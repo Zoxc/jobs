@@ -1,0 +1,8 @@
+[package]
+name = "jobs"
+version = "0.0.1"
+authors = ["John Kåre Alsaker <john.kare.alsaker@gmail.com>"]
+description = "build system"
+license = "MIT"
+
+[dependencies]
