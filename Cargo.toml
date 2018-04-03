@@ -9,6 +9,7 @@ license = "MIT"
 jobs-proc-macro = { path = "jobs-proc-macro", version = "0.0.1" }
 lazy_static = "1.0.0"
 bincode = "1.0.0"
+serde_json = "1.0"
 serde_derive = "1.0.37"
 serde = "1.0.37"
 scoped-tls = "0.1.1"

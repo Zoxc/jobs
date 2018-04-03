@@ -14,5 +14,5 @@ proc-macro2 = { version = "0.2", features = ["nightly"] }
 
 [dependencies.syn]
 version = "0.12.13"
-features = ["full", "fold", "parsing", "printing", "extra-traits"]
+features = ["full", "fold", "parsing", "printing", "extra-traits", "clone-impls"]
 default-features = false

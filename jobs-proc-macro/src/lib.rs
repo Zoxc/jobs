@@ -6,11 +6,10 @@ extern crate proc_macro2;
 extern crate proc_macro;
 #[macro_use]
 extern crate quote;
-#[macro_use]
 extern crate syn;
 
 use proc_macro2::Span;
-use proc_macro::{TokenStream, TokenTree, Delimiter, TokenNode};
+use proc_macro::{TokenStream, TokenNode};
 use quote::{Tokens, ToTokens};
 use syn::*;
 use syn::punctuated::Punctuated;
@@ -42,8 +41,7 @@ fn respan(input: proc_macro2::TokenStream,
 }
 
 fn async_inner(
-    boxed: bool,
-    pinned: bool,
+    input: bool,
     function: TokenStream,
     gen_function: Tokens,
 ) -> TokenStream
@@ -63,7 +61,7 @@ fn async_inner(
         ..
     } = match syn::parse(function).expect("failed to parse tokens as a function") {
         Item::Fn(item) => item,
-        _ => panic!("#[job] can only be applied to functions"),
+        _ => panic!("`job` attribute can only be applied to functions"),
     };
     let FnDecl {
         inputs,
@@ -74,7 +72,13 @@ fn async_inner(
         ..
     } = { *decl };
     let where_clause = &generics.where_clause;
-    assert!(variadic.is_none(), "variadic functions cannot be async");
+
+    if variadic.is_some() {
+        panic!("`job` attribute not supported for variadic functions");
+    }
+    if !generics.params.is_empty() {
+        panic!("`job` attribute not supported for generic functions");
+    }
     /*let (output, rarrow_token) = match output {
         ReturnType::Type(rarrow_token, t) => (*t, rarrow_token),
         ReturnType::Default => {
@@ -108,39 +112,16 @@ fn async_inner(
     //
     // We notably skip everything related to `self` which typically doesn't have
     // many patterns with it and just gets captured naturally.
-    let mut inputs_no_patterns = Vec::new();
+    let mut args = Vec::new();
+    let mut types = Vec::new();
     let mut patterns = Vec::new();
-    let mut temp_bindings = Vec::new();
     for (i, input) in inputs.into_iter().enumerate() {
-        // `self: Box<Self>` will get captured naturally
-        let mut is_input_no_pattern = false;
-        if let FnArg::Captured(ref arg) = input {
-            if let Pat::Ident(PatIdent { ref ident, ..}) = arg.pat {
-                if ident == "self" {
-                    is_input_no_pattern = true;
-                }
-            }
-        }
-        if is_input_no_pattern {
-            inputs_no_patterns.push(input);
-            continue
-        }
-
         match input {
-            FnArg::Captured(ArgCaptured {
-                pat: syn::Pat::Ident(syn::PatIdent {
-                    by_ref: None,
-                    ..
-                }),
-                ..
-            }) => {
-                inputs_no_patterns.push(input);
-            }
-
-            // `ref a: B` (or some similar pattern)
             FnArg::Captured(ArgCaptured { pat, ty, colon_token }) => {
                 patterns.push(pat);
-                let ident = Ident::from(format!("__arg_{}", i));
+                types.push(ty);
+                args.push(Ident::from(format!("__arg_{}", i)));
+                /*let ident = Ident::from(format!("__arg_{}", i));
                 temp_bindings.push(ident.clone());
                 let pat = PatIdent {
                     by_ref: None,
@@ -148,17 +129,13 @@ fn async_inner(
                     ident: ident,
                     subpat: None,
                 };
-                inputs_no_patterns.push(ArgCaptured {
+                args_paired_with_types.push(ArgCaptured {
                     pat: pat.into(),
                     ty,
                     colon_token,
-                }.into());
+                }.into());*/
             }
-
-            // Other `self`-related arguments get captured naturally
-            _ => {
-                inputs_no_patterns.push(input);
-            }
+            _ => panic!("unsupported function")
         }
     }
 
@@ -186,11 +163,13 @@ fn async_inner(
     });
     syn::token::Semi([block.brace_token.0]).to_tokens(&mut result);
 */
+    let args_c = args.clone();
+    let types_c = types.clone();
     let gen_body_inner = quote_cs! {
-        let __name = concat!(module_path!(), "::", stringify!(#ident));
-        let __compute = move |(#(#patterns,)*)| #block;
-        let __key = (#(#temp_bindings,)*);
-        ::jobs::execute_job(__name, __key, __compute)
+        let __name = ::jobs::DepNodeName(concat!(module_path!(), "::", stringify!(#ident)));
+        let __compute = move |(#(#patterns,)*): (#(#types_c,)*)| #block;
+        let __key = (#(#args_c,)*);
+        ::jobs::execute_job(__name, #input, __key, __compute)
     };
     let mut gen_body = Tokens::new();
     block.brace_token.surround(&mut gen_body, |tokens| {
@@ -223,9 +202,24 @@ fn async_inner(
     });
 */
     let output = quote_cs! {
+        #[allow(non_camel_case_types)]
+        #vis struct #ident {}
+        impl #ident {
+            fn execute(key: Vec<u8>) -> Vec<u8> {
+                let key = ::jobs::deserialize::<bool>(&key).unwrap();
+                let value = true;//compute_orig(key);
+                ::jobs::serialize(&value).unwrap()
+            }
+        }
+        impl ::jobs::RecheckResultOfJob for #ident {
+            fn forcer() -> (::jobs::DepNodeName, fn(Vec<u8>) -> Vec<u8>) {
+                let name = ::jobs::DepNodeName(concat!(module_path!(), "::", stringify!(#ident)));
+                (name, #ident::execute)
+            }
+        }
         #(#attrs)*
         #vis #unsafety #abi #constness
-        #fn_token #ident #generics(#(#inputs_no_patterns),*)
+        #fn_token #ident #generics(#(#args: #types),*)
             #output
             #where_clause
         #gen_body
@@ -237,12 +231,14 @@ fn async_inner(
 
 #[proc_macro_attribute]
 pub fn job(attribute: TokenStream, function: TokenStream) -> TokenStream {
-    match &attribute.to_string() as &str {
-        "" => (),
+    eprintln!("ATTR {}", &attribute.to_string() as &str);
+    let input = match &attribute.to_string() as &str {
+        "" => false,
+        "( input )" => true,
         _ => panic!("the #[job] attribute currently only takes no arguments"),
     };
 
-    let r = async_inner(false, true, function, quote_cs! { ::futures::__rt::gen_pinned });
+    let r = async_inner(input, function, quote_cs! { ::futures::__rt::gen_pinned });
     eprintln!("OUTPUT ```\n{}\n```", r);
     r
 }
