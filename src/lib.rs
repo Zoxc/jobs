@@ -17,7 +17,6 @@ use std::collections::hash_map::Entry;
 use std::any::{Any, TypeId};
 use std::hash::Hash;
 use std::panic;
-use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,7 +25,7 @@ use serde::{Deserialize, Serialize};
 pub use jobs_proc_macro::job;
 
 pub struct PanickedJob;
-
+/*
 /// Returns the last-modified time for `path`, or zero if it doesn't exist.
 fn mtime(path: &Path) -> SystemTime {
     fs::metadata(path).and_then(|f| f.modified()).unwrap_or(UNIX_EPOCH)
@@ -35,7 +34,7 @@ fn mtime(path: &Path) -> SystemTime {
 pub fn use_mtime(path: &Path) {
     DEPS.with(|deps| deps.lock().unwrap().files.insert((path.to_path_buf(), mtime(path))));
 }
-
+*/
 #[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
 struct DepNode {
     name: &'static str,
@@ -48,34 +47,40 @@ scoped_thread_local!(static DEPS: Mutex<Deps>);
 struct Deps {
     #[serde(skip)]
     from: HashSet<DepNode>,
-    #[serde(skip)]
-    files: HashSet<(PathBuf, SystemTime)>,
+    //#[serde(skip)]
+    //files: HashSet<(PathBuf, SystemTime)>,
 }
 
 impl Deps {
     fn empty() -> Self {
         Deps {
             from: HashSet::new(),
-            files: HashSet::new(),
+            //files: HashSet::new(),
         }
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct DepNodeData {
-    #[serde(skip)]
-    up_to_date: Cell<Option<bool>>,
-    deps: Deps,
-    value: Vec<u8>,
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum DepNodeChanges {
+    Unchanged,
+    Changed,
 }
 
-pub enum JobState<T> {
+enum DepNodeState {
+    Cached(DepNodeData),
+    Outdated,
     Active(JobHandle),
-    Complete(T),
     Panicked,
+    Fresh(DepNodeData, DepNodeChanges),
 }
 
-type JobMap<K, V> = Arc<Mutex<HashMap<K, JobState<V>>>>;
+type JobValue = Vec<u8>;
+
+#[derive(Serialize, Deserialize, Clone)]
+struct DepNodeData {
+    deps: Deps,
+    value: JobValue,
+}
 
 struct NamedMap {
     name: &'static str,
@@ -83,15 +88,23 @@ struct NamedMap {
 }
 
 struct Builder {
-    cached: Mutex<HashMap<DepNode, DepNodeData>>,
-    job_types: Mutex<HashMap<TypeId, NamedMap>>,
+    forcers: Mutex<HashMap<&'static str, fn(Vec<u8>) -> JobValue>>,
+    cached: Mutex<HashMap<DepNode, DepNodeState>>,
+}
+
+macro_rules! state_map {
+    ($builder:expr) => (*$builder.cached.lock().unwrap())
+}
+
+macro_rules! state {
+    ($builder:expr, $dep_node:expr) => (*state_map!($builder).get($dep_node).unwrap())
 }
 
 lazy_static! {
     static ref BUILDER: Builder = {
         Builder {
+            forcers: Mutex::new(HashMap::new()),
             cached: Mutex::new(HashMap::new()),
-            job_types: Mutex::new(HashMap::new()),
         }
     };
 }
@@ -120,34 +133,172 @@ impl JobHandle {
     }
 }
 
-fn is_up_to_date(cached: &HashMap<DepNode, DepNodeData>, dep_node: &DepNode) -> bool {
-    let node = cached.get(&dep_node).unwrap();
-    let status = node.up_to_date.get();
-    if let Some(status) = status {
-        return status;
+fn try_mark_up_to_date(builder: &Builder, dep_node: &DepNode) -> bool {
+    let deps = loop {
+        let handle = match state!(builder, &dep_node) {
+            DepNodeState::Active(ref handle) => {
+                // Await the result and then retry
+                handle.clone()
+            }
+            DepNodeState::Outdated |
+            DepNodeState::Panicked => return false,
+            DepNodeState::Cached(ref data) => break data.deps.from.clone(),
+            DepNodeState::Fresh(_, changes) => return changes == DepNodeChanges::Unchanged,
+        };
+        handle.await();
+    };
+    let up_to_date = deps.into_iter().all(|node| try_mark_up_to_date(builder, &node));
+
+    if up_to_date {
+        // Mark the node as green
+        let state_map = &mut state_map!(builder);
+        let state = state_map.get_mut(&dep_node).unwrap();
+        let new = match *state {
+            DepNodeState::Outdated |
+            DepNodeState::Panicked |
+            DepNodeState::Active(..) => panic!(),
+            DepNodeState::Cached(ref data) => Some(DepNodeState::Fresh(data.clone(),
+                                                                          DepNodeChanges::Unchanged)),
+            DepNodeState::Fresh(_, DepNodeChanges::Changed) => panic!(),
+            // Someone else marked it as unchanged already
+            DepNodeState::Fresh(_, DepNodeChanges::Unchanged) => None, 
+        };
+        if let Some(new) = new {
+            *state = new;
+        }
+        true
+    } else {
+        let forcer = builder.forcers.lock().unwrap().get(&dep_node.name).map(|f| *f);
+
+        if let Some(forcer) = forcer {
+            force(builder, dep_node, forcer);
+            // Check if its still outdated
+            match state!(builder, &dep_node) {
+                DepNodeState::Outdated |
+                DepNodeState::Cached(..) |
+                DepNodeState::Active(..) => panic!(),
+                DepNodeState::Panicked => false,
+                DepNodeState::Fresh(_, DepNodeChanges::Unchanged) => true,
+                DepNodeState::Fresh(_, DepNodeChanges::Changed) => false,
+            }
+        } else {
+            // Mark the node as outdated
+            let state_map = &mut state_map!(builder);
+            let state = state_map.get_mut(&dep_node).unwrap();
+            let update = match *state {
+                DepNodeState::Outdated => false, // Someone else marked it as outdated already
+                DepNodeState::Panicked |
+                DepNodeState::Active(..) => false, // Someone else executed it already, do nothing
+                DepNodeState::Cached(..) => true,
+                DepNodeState::Fresh(_, DepNodeChanges::Unchanged) => panic!(),
+
+                // Someone else executed it already, do nothing
+                DepNodeState::Fresh(_, DepNodeChanges::Changed) => false,
+            };
+            if update {
+                *state =  DepNodeState::Outdated;
+            }
+            false
+        }
     }
-    let mut up_to_date = true;
-    for node in &node.deps.from {
-        up_to_date = up_to_date && is_up_to_date(cached, node);
+}
+
+fn force<
+    C: (FnOnce(Vec<u8>) -> JobValue) + 'static, 
+> (builder: &Builder, dep_node: &DepNode, compute: C) {
+    enum Action {
+        Create(JobHandle, Option<JobValue>),
+        Await(JobHandle),
     }
-    for file in &node.deps.files {
-        up_to_date = up_to_date && (mtime(&file.0) == file.1);
+
+    let action = {
+        match builder.cached.lock().unwrap().entry(dep_node.clone()) {
+            Entry::Occupied(mut entry) => {
+                let action = match *entry.get() {
+                    DepNodeState::Active(ref handle) => Action::Await(handle.clone()),
+                    DepNodeState::Fresh(..) |
+                    DepNodeState::Panicked => return,
+                    DepNodeState::Outdated => Action::Create(JobHandle::new(), None),
+                    DepNodeState::Cached(ref data) => {
+                        Action::Create(JobHandle::new(), Some(data.value.clone()))
+                    }
+                };
+                if let Action::Create(ref handle, _) = action {
+                    *entry.get_mut() = DepNodeState::Active(handle.clone())
+                }
+                action
+            }
+            Entry::Vacant(entry) => {
+                let handle = JobHandle::new();
+                entry.insert(DepNodeState::Active(handle.clone()));
+                Action::Create(handle, None)
+            }
+        }
+    };
+
+    match action {
+        Action::Create(handle, old_value) => {
+            let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                DEPS.set(&(handle.0).2, || compute(dep_node.key.clone()))
+            }));
+
+            let (new_state, panic) = match result {
+                Ok(value) => {
+                    let deps = handle.drain_deps();
+                    let changes = if old_value.map(|old_value| old_value == value).unwrap_or(false) {
+                        DepNodeChanges::Unchanged
+                    } else {
+                        DepNodeChanges::Changed
+                    };
+                    (DepNodeState::Fresh(DepNodeData {
+                        deps,
+                        value,
+                    }, changes), None)
+                }
+                Err(panic) => {
+                    (DepNodeState::Panicked, Some(panic))
+                }
+            };
+
+            {
+                let state_map = &mut state_map!(builder);
+                let state = state_map.get_mut(&dep_node).unwrap();
+
+                match *state {
+                    DepNodeState::Active(..) => (),
+                    _ => panic!(),
+                }
+
+                *state = new_state;
+            }
+
+            handle.signal();
+
+            if let Some(panic) = panic {
+                panic::resume_unwind(panic)
+            }
+        }
+        Action::Await(handle) => handle.await(),
     }
-    node.up_to_date.set(Some(up_to_date));
-    up_to_date
 }
 
 pub fn execute_job<
-    K: Eq + Serialize + Hash + Send + Clone + 'static,
+    K: Eq + Serialize + for<'a> Deserialize<'a> + Hash + Send + Clone + 'static,
     V: Send + Clone + Serialize + for<'a> Deserialize<'a> + 'static,
     C: (FnOnce(K) -> V) + 'static, 
-> (name: &'static str, key: K, compute: C) -> V {
+> (name: &'static str, key: K, compute_orig: C) -> V {
     enum Action<T> {
         Create(JobHandle),
         Await(JobHandle),
         Complete(T),
         Panic,
     }
+
+    let compute = move |key: Vec<u8>| -> JobValue {
+        let key = bincode::deserialize::<K>(&key).unwrap();
+        let value = compute_orig(key);
+        bincode::serialize(&value).unwrap()
+    };
 
     let dep_node = DepNode {
         name,
@@ -159,84 +310,38 @@ pub fn execute_job<
     }
 
     let builder = &*BUILDER;
-    let job_map: JobMap<K, V> = {
-        let mut types_map = builder.job_types.lock().unwrap();
-        let job_map = types_map.entry(TypeId::of::<C>()).or_insert_with(|| {
-            let empty_map: Box<JobMap<K, V>> = Box::new(Arc::new(Mutex::new(HashMap::new())));
-            NamedMap {
-                name,
-                map: empty_map,
-            }
-        });
-        job_map.map.downcast_ref::<JobMap<K, V>>().unwrap().clone()
+
+    let try_mark = match builder.cached.lock().unwrap().get(&dep_node) {
+        Some(&DepNodeState::Cached(..)) => true,
+        _ => false,
     };
 
-    let action = {
-        match job_map.lock().unwrap().entry(key.clone()) {
-            Entry::Occupied(entry) => {
-                match *entry.get() {
-                    JobState::Active(ref handle) => Action::Await(handle.clone()),
-                    JobState::Complete(ref value) => Action::Complete(value.clone()),
-                    JobState::Panicked => Action::Panic,
-                }
-            }
-            Entry::Vacant(entry) => {
-                let handle = JobHandle::new();
-                let r = handle.clone();
-                entry.insert(JobState::Active(handle));
-                Action::Create(r)
-            }
-        }
-    };
-
-    match action {
-        Action::Create(handle) => {
-            let mut cached = builder.cached.lock().unwrap();
-            let r = if cached.get(&dep_node).is_some() && is_up_to_date(&*cached, &dep_node) {
-                eprintln!("Loaded from cache {:?}", dep_node);
-                let r = Ok(bincode::deserialize::<V>(&cached.get(&dep_node).unwrap().value).unwrap());
-                drop(cached);
-                r
-            } else {
-                drop(cached);
-                let r = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    DEPS.set(&(handle.0).2, || compute(key.clone()))
-                }));
-                if let Ok(ref v) = r {
-                    let deps = handle.drain_deps();
-                    eprintln!("Computed {:?} with deps {:#?}", dep_node, deps);
-                    builder.cached.lock().unwrap().insert(dep_node, DepNodeData {
-                        up_to_date: Cell::new(None),
-                        deps,
-                        value: bincode::serialize(v).unwrap(),
-                    });
-                }
-                r
+    if try_mark {
+        if !try_mark_up_to_date(builder, &dep_node) {
+            let do_force = match state!(builder, &dep_node) {
+                DepNodeState::Outdated |
+                DepNodeState::Cached(..) |
+                DepNodeState::Active(..) => true,
+                DepNodeState::Panicked |
+                DepNodeState::Fresh(..) => false,
             };
-            let new_state = r.as_ref().ok().map(|v| JobState::Complete(v.clone()))
-                                           .unwrap_or(JobState::Panicked);
-            job_map.lock().unwrap().insert(key.clone(), new_state);
-            let deps = handle.signal();
-            match r {
-                Ok(v) => return v,
-                Err(e) => panic::resume_unwind(e),
+            if do_force {
+                force(builder, &dep_node, compute)
             }
         }
-        Action::Await(handle) => {
-            eprintln!("Await {:?}", dep_node);
-            handle.await();
-            match *job_map.lock().unwrap().get(&key).unwrap() {
-                JobState::Complete(ref value) => return value.clone(),
-                JobState::Panicked => (),
-                _ => panic!(),
-            }
-            // Panic here so we don't poison the lock
-            panic::resume_unwind(Box::new(PanickedJob))
-        }
-        Action::Panic => panic::resume_unwind(Box::new(PanickedJob)),
-        Action::Complete(value) => {
-            
-                eprintln!("Complete already {:?}", dep_node);
-            return value },
+    } else {
+        force(builder, &dep_node, compute)
     }
+
+    match *builder.cached.lock().unwrap().get(&dep_node).unwrap() {
+        DepNodeState::Outdated |
+        DepNodeState::Cached(..) |
+        DepNodeState::Active(..) => panic!(),
+        DepNodeState::Panicked => (),
+        DepNodeState::Fresh(ref data, _) => {
+            return bincode::deserialize::<V>(&data.value).unwrap()
+        }
+    };
+    // Panic here so we don't poison the lock
+    panic::resume_unwind(Box::new(PanickedJob))
 }
