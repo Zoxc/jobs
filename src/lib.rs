@@ -26,6 +26,7 @@ pub use bincode::{deserialize, serialize};
 pub use util::Symbol;
 
 mod execute;
+pub mod parallel;
 pub mod util;
 
 pub struct PanickedTask;

@@ -3,8 +3,8 @@ use std::collections::hash_map::Entry;
 use std::panic;
 
 use crate::{
-    Builder, DepNode, DepNodeChanges, DepNodeData, DepNodeState, Deps, ActiveTaskHandle, PanickedTask,
-    SerializedResult, Task, DEPS,
+    ActiveTaskHandle, Builder, DepNode, DepNodeChanges, DepNodeData, DepNodeState, Deps,
+    PanickedTask, SerializedResult, Task, DEPS,
 };
 
 impl Builder {
