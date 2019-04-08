@@ -3,7 +3,7 @@ use std::collections::hash_map::Entry;
 use std::panic;
 
 use crate::{
-    Builder, DepNode, DepNodeChanges, DepNodeData, DepNodeState, Deps, JobHandle, PanickedTask,
+    Builder, DepNode, DepNodeChanges, DepNodeData, DepNodeState, Deps, ActiveTaskHandle, PanickedTask,
     SerializedResult, Task, DEPS,
 };
 
@@ -71,8 +71,8 @@ impl Builder {
 
     fn force(&self, dep_node: &DepNode) {
         enum Action {
-            Create(JobHandle, Option<SerializedResult>),
-            Await(JobHandle),
+            Create(ActiveTaskHandle, Option<SerializedResult>),
+            Await(ActiveTaskHandle),
         }
 
         let compute = self.task_executors.get(&dep_node.name).unwrap_or_else(|| {
@@ -86,7 +86,7 @@ impl Builder {
                         DepNodeState::Active(ref handle) => Action::Await(handle.clone()),
                         DepNodeState::Fresh(..) | DepNodeState::Panicked => return,
                         DepNodeState::Cached(ref data) => {
-                            Action::Create(JobHandle::new(), Some(data.result.clone()))
+                            Action::Create(ActiveTaskHandle::new(), Some(data.result.clone()))
                         }
                     };
                     if let Action::Create(ref handle, _) = action {
@@ -95,7 +95,7 @@ impl Builder {
                     action
                 }
                 Entry::Vacant(entry) => {
-                    let handle = JobHandle::new();
+                    let handle = ActiveTaskHandle::new();
                     entry.insert(DepNodeState::Active(handle.clone()));
                     Action::Create(handle, None)
                 }

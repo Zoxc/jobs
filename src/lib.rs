@@ -191,7 +191,7 @@ enum DepNodeChanges {
 
 enum DepNodeState {
     Cached(DepNodeData),
-    Active(JobHandle),
+    Active(ActiveTaskHandle),
     Panicked,
     Fresh(DepNodeData, DepNodeChanges),
 }
@@ -280,11 +280,11 @@ impl Builder {
 }
 
 #[derive(Clone)]
-pub struct JobHandle(Arc<(Mutex<bool>, Condvar)>);
+pub struct ActiveTaskHandle(Arc<(Mutex<bool>, Condvar)>);
 
-impl JobHandle {
+impl ActiveTaskHandle {
     fn new() -> Self {
-        JobHandle(Arc::new((Mutex::new(false), Condvar::new())))
+        ActiveTaskHandle(Arc::new((Mutex::new(false), Condvar::new())))
     }
 
     fn await_task(&self) {
