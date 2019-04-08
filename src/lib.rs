@@ -11,6 +11,7 @@ extern crate scoped_tls;
 // Allows macros to refer to this crate as `::jobs`
 extern crate self as jobs;
 
+use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 pub use serde_derive::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -19,27 +20,15 @@ use std::hash::Hash;
 use std::io::{Read, Write};
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 
 pub use bincode::{deserialize, serialize};
 pub use util::Symbol;
 
-pub struct PanickedJob;
-
-macro_rules! state_map {
-    ($builder:expr) => {
-        *$builder.cached.lock().unwrap()
-    };
-}
-
-macro_rules! state {
-    ($builder:expr, $dep_node:expr) => {
-        *state_map!($builder).get($dep_node).unwrap()
-    };
-}
-
 mod execute;
 pub mod util;
+
+pub struct PanickedTask;
 
 pub struct TaskGroup(pub fn(&mut Builder));
 
@@ -259,7 +248,7 @@ impl Builder {
         let mut data = Vec::new();
         file.read_to_end(&mut data).unwrap();
         let data = bincode::deserialize::<Graph>(&data).unwrap();
-        let map = builder.cached.get_mut().unwrap();
+        let map = builder.cached.get_mut();
         for (node, data) in data.data {
             //println!("loading {:?} {:?}", node, data);
             map.insert(node, DepNodeState::Cached(data));
@@ -269,7 +258,7 @@ impl Builder {
 
     pub fn save(self) {
         let mut graph = Vec::new();
-        let map = self.cached.into_inner().unwrap();
+        let map = self.cached.into_inner();
         for (node, state) in map.into_iter() {
             match state {
                 DepNodeState::Cached(data) | DepNodeState::Fresh(data, _) => {
@@ -291,29 +280,21 @@ impl Builder {
 }
 
 #[derive(Clone)]
-pub struct JobHandle(Arc<(Mutex<bool>, Condvar, Mutex<Deps>)>);
+pub struct JobHandle(Arc<(Mutex<bool>, Condvar)>);
 
 impl JobHandle {
     fn new() -> Self {
-        JobHandle(Arc::new((
-            Mutex::new(false),
-            Condvar::new(),
-            Mutex::new(Deps::empty()),
-        )))
+        JobHandle(Arc::new((Mutex::new(false), Condvar::new())))
     }
 
     fn await_task(&self) {
-        let mut done = (self.0).0.lock().unwrap();
+        let mut done = (self.0).0.lock();
         while !*done {
-            done = (self.0).1.wait(done).unwrap();
+            (self.0).1.wait(&mut done);
         }
     }
 
-    fn drain_deps(&self) -> Deps {
-        std::mem::replace(&mut *(self.0).2.lock().unwrap(), Deps::empty())
-    }
-
     fn signal(&self) {
-        (self.0).1.notify_all()
+        (self.0).1.notify_all();
     }
 }

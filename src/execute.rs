@@ -1,12 +1,19 @@
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use std::collections::hash_map::Entry;
 use std::panic;
 
 use crate::{
-    Builder, DepNode, DepNodeChanges, DepNodeData, DepNodeState, JobHandle, PanickedJob,
+    Builder, DepNode, DepNodeChanges, DepNodeData, DepNodeState, Deps, JobHandle, PanickedTask,
     SerializedResult, Task, DEPS,
 };
 
 impl Builder {
+    fn node_state(&self, dep_node: &DepNode) -> MappedMutexGuard<'_, DepNodeState> {
+        MutexGuard::map(self.cached.lock(), |cached| {
+            cached.get_mut(dep_node).unwrap()
+        })
+    }
+
     fn try_mark_up_to_date(&self, dep_node: &DepNode) -> bool {
         if dep_node.eval_always {
             // We can immediately execute `eval_always` queries
@@ -14,7 +21,7 @@ impl Builder {
         }
 
         let deps = loop {
-            let handle = match state!(self, &dep_node) {
+            let handle = match *self.node_state(&dep_node) {
                 DepNodeState::Active(ref handle) => {
                     // Await the result and then retry
                     handle.clone()
@@ -29,7 +36,7 @@ impl Builder {
 
         if up_to_date {
             // Mark the node as green
-            let state_map = &mut state_map!(self);
+            let state_map = &mut *self.cached.lock();
             let state = state_map.get_mut(&dep_node).unwrap();
             let new = match *state {
                 DepNodeState::Panicked | DepNodeState::Active(..) => panic!(),
@@ -54,7 +61,7 @@ impl Builder {
         self.force(dep_node);
 
         // Check if its still outdated
-        match state!(self, &dep_node) {
+        match *self.node_state(&dep_node) {
             DepNodeState::Cached(..) | DepNodeState::Active(..) => panic!(),
             DepNodeState::Panicked => false,
             DepNodeState::Fresh(_, DepNodeChanges::Unchanged) => true,
@@ -73,7 +80,7 @@ impl Builder {
         });
 
         let action = {
-            match self.cached.lock().unwrap().entry(dep_node.clone()) {
+            match self.cached.lock().entry(dep_node.clone()) {
                 Entry::Occupied(mut entry) => {
                     let action = match *entry.get() {
                         DepNodeState::Active(ref handle) => Action::Await(handle.clone()),
@@ -97,13 +104,14 @@ impl Builder {
 
         match action {
             Action::Create(handle, old_result) => {
+                let deps = Mutex::new(Deps::empty());
                 let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    DEPS.set(&(handle.0).2, || compute(self, &dep_node.task))
+                    DEPS.set(&deps, || compute(self, &dep_node.task))
                 }));
 
                 let (new_state, panic) = match result {
                     Ok(result) => {
-                        let deps = handle.drain_deps();
+                        let deps = deps.into_inner();
                         //println!("gots deps {:?} for node {:?}", deps, dep_node);
                         if deps.from.is_empty() && !dep_node.eval_always {
                             eprintln!(
@@ -129,17 +137,14 @@ impl Builder {
                     Err(panic) => (DepNodeState::Panicked, Some(panic)),
                 };
 
-                {
-                    let state_map = &mut state_map!(self);
-                    let state = state_map.get_mut(&dep_node).unwrap();
+                let mut state = self.node_state(&dep_node);
 
-                    match *state {
-                        DepNodeState::Active(..) => (),
-                        _ => panic!(),
-                    }
-
-                    *state = new_state;
+                match *state {
+                    DepNodeState::Active(..) => (),
+                    _ => panic!(),
                 }
+
+                *state = new_state;
 
                 handle.signal();
 
@@ -156,11 +161,11 @@ impl Builder {
 
         if DEPS.is_set() {
             // Add this task to the list of dependencies for the current running task
-            DEPS.with(|deps| deps.lock().unwrap().from.insert(dep_node.clone()));
+            DEPS.with(|deps| deps.lock().from.insert(dep_node.clone()));
         }
 
         // Is there a cached result for this task?
-        let cached_result_exists = match self.cached.lock().unwrap().get(&dep_node) {
+        let cached_result_exists = match self.cached.lock().get(&dep_node) {
             Some(&DepNodeState::Cached(..)) => true,
             _ => false,
         };
@@ -168,7 +173,7 @@ impl Builder {
         if cached_result_exists {
             // Try to bring the cached result up to date
             if !self.try_mark_up_to_date(&dep_node) {
-                let outdated = match state!(self, &dep_node) {
+                let outdated = match *self.node_state(&dep_node) {
                     DepNodeState::Cached(..) | DepNodeState::Active(..) => true,
                     DepNodeState::Panicked | DepNodeState::Fresh(..) => false,
                 };
@@ -182,12 +187,12 @@ impl Builder {
             self.force(&dep_node)
         }
 
-        match *self.cached.lock().unwrap().get(&dep_node).unwrap() {
+        match *self.node_state(&dep_node) {
             DepNodeState::Cached(..) | DepNodeState::Active(..) => panic!(),
             DepNodeState::Panicked => (),
             DepNodeState::Fresh(ref data, _) => return data.result.to_result::<T>(),
         };
         // Panic here so we don't poison the lock
-        panic::resume_unwind(Box::new(PanickedJob))
+        panic::resume_unwind(Box::new(PanickedTask))
     }
 }
