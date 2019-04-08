@@ -73,6 +73,7 @@ tasks! {
     builder_var: _builder;
     pub group TASKS;
 
+    #[eval_always]
     pub task Mtime {
         path: PathBuf,
     } -> SystemTime {

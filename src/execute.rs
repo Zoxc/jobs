@@ -26,7 +26,8 @@ fn force_and_check(builder: &Builder, dep_node: &DepNode) -> bool {
 }
 
 fn try_mark_up_to_date(builder: &Builder, dep_node: &DepNode) -> bool {
-    if dep_node.input {
+    if dep_node.eval_always {
+        // We can immediately execute `eval_always` queries
         return force_and_check(builder, dep_node);
     }
 
@@ -113,9 +114,9 @@ fn force(
                 Ok(result) => {
                     let deps = handle.drain_deps();
                     //println!("gots deps {:?} for node {:?}", deps, dep_node);
-                    if deps.from.is_empty() && !dep_node.input {
-                        eprintln!("warning: job `{}` has no dependencies \
-                                   and isn't an input, it won't be executed again", dep_node.name);
+                    if deps.from.is_empty() && !dep_node.eval_always {
+                        eprintln!("warning: task `{}` has no dependencies \
+                                   and isn't an #[eval_always] task, it won't be executed again", dep_node.name);
                     }
                     let changes = if old_result.map(|old_result| old_result == result).unwrap_or(false) {
                         DepNodeChanges::Unchanged
@@ -155,41 +156,46 @@ fn force(
 }
 
 impl Builder {
-    pub fn run<T: Task>(&mut self, task: T) -> T::Result {
+    pub fn run<T: Task>(&self, task: T) -> T::Result {
         let dep_node = DepNode {
             name: Symbol(T::IDENTIFIER),
-            input: T::IS_INPUT,
+            eval_always: T::EVAL_ALWAYS,
             task: SerializedTask::new(&task),
         };
 
         if DEPS.is_set() {
-            //println!("adding dep {:?}", dep_node);
+            // Add this task to the list of dependencies for the current running task
             DEPS.with(|deps| deps.lock().unwrap().from.insert(dep_node.clone()));
         }
 
+        // Make sure this task is registered
         if self.forcers.get(&dep_node.name).is_none() {
             panic!("Task `{}` is not registered", dep_node.name);
         }
 
-        let try_mark = match self.cached.lock().unwrap().get(&dep_node) {
+        // Is there a cached result for this task?
+        let cached_result_exists = match self.cached.lock().unwrap().get(&dep_node) {
             Some(&DepNodeState::Cached(..)) => true,
             _ => false,
         };
 
-        if try_mark {
+        if cached_result_exists {
+            // Try to bring the cached result up to date
             if !try_mark_up_to_date(self, &dep_node) {
-                let do_force = match state!(self, &dep_node) {
+                let outdated = match state!(self, &dep_node) {
                     DepNodeState::Outdated |
                     DepNodeState::Cached(..) |
                     DepNodeState::Active(..) => true,
                     DepNodeState::Panicked |
                     DepNodeState::Fresh(..) => false,
                 };
-                if do_force {
+                if outdated {
+                    // The result was outdated, force the task to run
                     force(self, &dep_node, Builder::run_erased::<T>)
                 }
             }
         } else {
+            // There was no cached result, force the task to run
             force(self, &dep_node, Builder::run_erased::<T>)
         }
 

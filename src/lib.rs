@@ -1,7 +1,6 @@
 extern crate core;
 #[macro_use]
 extern crate lazy_static;
-#[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
 extern crate serde;
@@ -15,10 +14,12 @@ extern crate self as jobs;
 use std::sync::{Arc, Mutex, Condvar};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::path::{Path, PathBuf};
 use std::panic;
 use std::fs::{File};
 use std::io::{Write, Read};
 use serde::{Deserialize, Serialize};
+pub use serde_derive::{Deserialize, Serialize};
 
 pub use bincode::{deserialize, serialize};
 pub use util::Symbol;
@@ -36,11 +37,14 @@ macro_rules! state {
 pub mod util;
 mod execute;
 
-pub struct TaskGroup(fn (&mut Builder));
+pub struct TaskGroup(pub fn (&mut Builder));
 
-pub trait Task: Eq + Serialize + for<'a> Deserialize<'a> + Hash + Send + Clone + 'static  {
+pub trait Task: Eq + Serialize + for<'a> Deserialize<'a> + Hash + Send + Clone + 'static {
+    /// An unique string identifying the task
     const IDENTIFIER: &'static str;
-    const IS_INPUT: bool;
+
+    const EVAL_ALWAYS: bool;
+    const EARLY_CUTOFF: bool;
 
     type Result: Send + Clone + Serialize + for<'a> Deserialize<'a> + 'static;
 
@@ -55,11 +59,47 @@ macro_rules! strip_field_tys {
 }
 
 #[macro_export]
+macro_rules! declare_task {
+    ($vis:vis $name:ident $($field:ident: $ty:ty,)*) => {
+        #[derive(jobs::Serialize, jobs::Deserialize, Hash, Eq, PartialEq, Clone)]
+        $vis struct $name { $($vis $field: $ty,)* }
+    };
+}
+
+#[macro_export]
+macro_rules! is_eval_always {
+    () => {{
+        false
+    }};
+    (eval_always$(, $modifiers:ident)*) => {{
+        true
+    }};
+    ($other:ident$(, $modifiers:ident)*) => {
+        ::jobs::is_eval_always!($($modifiers),*)
+    };
+}
+
+#[macro_export]
+macro_rules! is_early_cutoff {
+    () => {{
+        true
+    }};
+    (no_early_cutoff$(, $modifiers:ident)*) => {{
+        false
+    }};
+    ($other:ident$(, $modifiers:ident)*) => {
+        ::jobs::is_early_cutoff!($($modifiers),*)
+    };
+}
+
+#[macro_export]
 macro_rules! tasks {
     (builder_var: $builder:ident;
      $gvis:vis group $group:ident;
         $(
-            $tvis:vis task $name:ident { $($fields:tt)* } -> $res:ty { $($body:tt)* }
+            $(#[$attr:ident])* $tvis:vis task $name:ident {
+                $($fields:tt)*
+            } -> $res:ty { $($body:tt)* }
         )*
     ) => {
         $gvis const $group: ::jobs::TaskGroup = {
@@ -72,13 +112,13 @@ macro_rules! tasks {
             ::jobs::TaskGroup(register)
         };
         $(
-            #[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Clone)]
-            $tvis struct $name { $($fields)* }
+            ::jobs::declare_task!($tvis $name $($fields)*);
 
             impl ::jobs::Task for $name {
                 // FIXME: Make this a function and use a `static` inside for an unique address
-                const IDENTIFIER: &'static str = concat!(module_path!(), "::", stringify!(#ident));
-                const IS_INPUT: bool = false;
+                const IDENTIFIER: &'static str = concat!(module_path!(), "::", stringify!($name));
+                const EVAL_ALWAYS: bool = ::jobs::is_eval_always!($($attr),*);
+                const EARLY_CUTOFF: bool = ::jobs::is_early_cutoff!($($attr),*);
 
                 type Result = $res;
 
@@ -119,7 +159,7 @@ impl SerializedResult {
 #[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
 struct DepNode {
     name: Symbol,
-    input: bool,
+    eval_always: bool,
     task: SerializedTask,
 }
 
@@ -163,9 +203,8 @@ struct Graph {
     data: Vec<(DepNode, DepNodeData)>
 }
 
-const PATH: &str = "build-index";
-
 pub struct Builder {
+    index: PathBuf,
     forcers: HashMap<Symbol, fn(&Builder, &SerializedTask) -> SerializedResult>,
     cached: Mutex<HashMap<DepNode, DepNodeState>>,
 }
@@ -184,27 +223,26 @@ impl Builder {
         self.forcers.insert(Symbol(T::IDENTIFIER), Builder::run_erased::<T>);
     }
 
-    pub fn load(path: &str) -> Self {
-        let mut file = if let Ok(file) = File::open(path) {
+    pub fn load(path: &Path) -> Self {
+        let mut builder = Builder {
+            index: path.to_path_buf(),
+            forcers: HashMap::new(),
+            cached: Mutex::new(HashMap::new()),
+        };
+        let mut file = if let Ok(file) = File::open(&builder.index) {
             file
         } else {
-            return Builder {
-                forcers: HashMap::new(),
-                cached: Mutex::new(HashMap::new()),
-            };
+            return builder;
         };
         let mut data = Vec::new();
         file.read_to_end(&mut data).unwrap();
         let data = bincode::deserialize::<Graph>(&data).unwrap();
-        let mut map = HashMap::new();
+        let map = builder.cached.get_mut().unwrap();
         for (node, data) in data.data {
             //println!("loading {:?} {:?}", node, data);
             map.insert(node, DepNodeState::Cached(data));
         }
-        Builder {
-            forcers: HashMap::new(),
-            cached: Mutex::new(map),
-        }
+        builder
     }
 
     pub fn save(self) {
@@ -224,7 +262,7 @@ impl Builder {
         }
         let graph = Graph { data: graph };
         let data = bincode::serialize(&graph).unwrap();
-        let mut file = File::create(PATH).unwrap();
+        let mut file = File::create(self.index).unwrap();
         file.write_all(&data).unwrap();
         let data = serde_json::to_string_pretty(&graph).unwrap();
         let mut file = File::create("build-index.json").unwrap();
