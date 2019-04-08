@@ -1,7 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::panic;
 
-use crate::util::Symbol;
 use crate::{
     DEPS, DepNode, Builder, JobHandle, DepNodeData, DepNodeState, PanickedJob,
     DepNodeChanges, Task, SerializedTask, SerializedResult,
@@ -157,11 +156,7 @@ fn force(
 
 impl Builder {
     pub fn run<T: Task>(&self, task: T) -> T::Result {
-        let dep_node = DepNode {
-            name: Symbol(T::IDENTIFIER),
-            eval_always: T::EVAL_ALWAYS,
-            task: SerializedTask::new(&task),
-        };
+        let dep_node = DepNode::new(&task);
 
         if DEPS.is_set() {
             // Add this task to the list of dependencies for the current running task

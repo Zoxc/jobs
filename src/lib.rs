@@ -61,7 +61,7 @@ macro_rules! strip_field_tys {
 #[macro_export]
 macro_rules! declare_task {
     ($vis:vis $name:ident $($field:ident: $ty:ty,)*) => {
-        #[derive(jobs::Serialize, jobs::Deserialize, Hash, Eq, PartialEq, Clone)]
+        #[derive(jobs::Serialize, jobs::Deserialize, Hash, Eq, PartialEq, Clone, Debug)]
         $vis struct $name { $($vis $field: $ty,)* }
     };
 }
@@ -163,6 +163,16 @@ struct DepNode {
     task: SerializedTask,
 }
 
+impl DepNode {
+    fn new<T: Task>(task: &T) -> Self {
+        DepNode {
+            name: Symbol(T::IDENTIFIER),
+            eval_always: T::EVAL_ALWAYS,
+            task: SerializedTask::new(task),
+        }
+    }
+}
+
 scoped_thread_local!(static DEPS: Mutex<Deps>);
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -223,12 +233,18 @@ impl Builder {
         self.forcers.insert(Symbol(T::IDENTIFIER), Builder::run_erased::<T>);
     }
 
-    pub fn load(path: &Path) -> Self {
+    pub fn new(path: &Path) -> Self {
         let mut builder = Builder {
             index: path.to_path_buf(),
             forcers: HashMap::new(),
             cached: Mutex::new(HashMap::new()),
         };
+        builder.register(util::TASKS);
+        builder
+    }
+
+    pub fn load(path: &Path) -> Self {
+        let mut builder = Builder::new(path);
         let mut file = if let Ok(file) = File::open(&builder.index) {
             file
         } else {
