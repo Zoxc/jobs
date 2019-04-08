@@ -1,16 +1,14 @@
 use std::collections::hash_map::Entry;
-use std::hash::Hash;
 use std::panic;
-use serde::{Deserialize, Serialize};
 
 use crate::util::Symbol;
 use crate::{
-    DEPS, DepNode, Builder, JobValue, JobHandle, DepNodeData, DepNodeState, PanickedJob,
-    DepNodeChanges, Task, SerializedTask,
+    DEPS, DepNode, Builder, JobHandle, DepNodeData, DepNodeState, PanickedJob,
+    DepNodeChanges, Task, SerializedTask, SerializedResult,
 };
 
 fn force_and_check(builder: &Builder, dep_node: &DepNode) -> bool {
-    let forcer = builder.forcers.get(&dep_node.name).unwrap_or_else(|| {
+    let forcer = *builder.forcers.get(&dep_node.name).unwrap_or_else(|| {
         panic!("Task `{}` is not registered", dep_node.name);
     });
 
@@ -70,11 +68,13 @@ fn try_mark_up_to_date(builder: &Builder, dep_node: &DepNode) -> bool {
     }
 }
 
-fn force<
-    C: FnOnce(&Builder, Vec<u8>) -> JobValue, 
-> (builder: &Builder, dep_node: &DepNode, compute: C) {
+fn force(
+    builder: &Builder,
+    dep_node: &DepNode,
+    compute: fn(&Builder, &SerializedTask) -> SerializedResult,
+) {
     enum Action {
-        Create(JobHandle, Option<JobValue>),
+        Create(JobHandle, Option<SerializedResult>),
         Await(JobHandle),
     }
 
@@ -87,7 +87,7 @@ fn force<
                     DepNodeState::Panicked => return,
                     DepNodeState::Outdated => Action::Create(JobHandle::new(), None),
                     DepNodeState::Cached(ref data) => {
-                        Action::Create(JobHandle::new(), Some(data.value.clone()))
+                        Action::Create(JobHandle::new(), Some(data.result.clone()))
                     }
                 };
                 if let Action::Create(ref handle, _) = action {
@@ -104,27 +104,27 @@ fn force<
     };
 
     match action {
-        Action::Create(handle, old_value) => {
+        Action::Create(handle, old_result) => {
             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                DEPS.set(&(handle.0).2, || compute(builder, dep_node.key.clone()))
+                DEPS.set(&(handle.0).2, || compute(builder, &dep_node.task))
             }));
 
             let (new_state, panic) = match result {
-                Ok(value) => {
+                Ok(result) => {
                     let deps = handle.drain_deps();
                     //println!("gots deps {:?} for node {:?}", deps, dep_node);
                     if deps.from.is_empty() && !dep_node.input {
                         eprintln!("warning: job `{}` has no dependencies \
                                    and isn't an input, it won't be executed again", dep_node.name);
                     }
-                    let changes = if old_value.map(|old_value| old_value == value).unwrap_or(false) {
+                    let changes = if old_result.map(|old_result| old_result == result).unwrap_or(false) {
                         DepNodeChanges::Unchanged
                     } else {
                         DepNodeChanges::Changed
                     };
                     (DepNodeState::Fresh(DepNodeData {
                         deps,
-                        value,
+                        result,
                     }, changes), None)
                 }
                 Err(panic) => {
@@ -155,7 +155,7 @@ fn force<
 }
 
 impl Builder {
-    pub fn run<T: Task>(&mut self, task: T) {
+    pub fn run<T: Task>(&mut self, task: T) -> T::Result {
         let dep_node = DepNode {
             name: Symbol(T::IDENTIFIER),
             input: T::IS_INPUT,
@@ -199,7 +199,7 @@ impl Builder {
             DepNodeState::Active(..) => panic!(),
             DepNodeState::Panicked => (),
             DepNodeState::Fresh(ref data, _) => {
-                return bincode::deserialize::<V>(&data.value).unwrap()
+                return data.result.to_result::<T>()
             }
         };
         // Panic here so we don't poison the lock

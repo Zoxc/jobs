@@ -70,8 +70,8 @@ pub fn mtime_untracked(path: &Path) -> SystemTime {
 }
 
 tasks! {
-    builder_var: builder;
-    pub group Tasks;
+    builder_var: _builder;
+    pub group TASKS;
 
     pub task Mtime {
         path: PathBuf,

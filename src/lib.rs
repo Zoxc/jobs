@@ -14,7 +14,6 @@ extern crate self as jobs;
 
 use std::sync::{Arc, Mutex, Condvar};
 use std::collections::{HashMap, HashSet};
-use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::panic;
 use std::fs::{File};
@@ -93,7 +92,7 @@ macro_rules! tasks {
     };
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
 struct SerializedTask(Vec<u8>);
 
 impl SerializedTask {
@@ -105,6 +104,7 @@ impl SerializedTask {
     }
 }
 
+#[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
 struct SerializedResult(Vec<u8>);
 
 impl SerializedResult {
@@ -152,12 +152,10 @@ enum DepNodeState {
     Fresh(DepNodeData, DepNodeChanges),
 }
 
-type JobValue = Vec<u8>;
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct DepNodeData {
     deps: Deps,
-    value: JobValue,
+    result: SerializedResult,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -168,7 +166,7 @@ struct Graph {
 const PATH: &str = "build-index";
 
 pub struct Builder {
-    forcers: HashMap<Symbol, fn(&Builder, SerializedTask) -> SerializedResult>,
+    forcers: HashMap<Symbol, fn(&Builder, &SerializedTask) -> SerializedResult>,
     cached: Mutex<HashMap<DepNode, DepNodeState>>,
 }
 
@@ -177,10 +175,9 @@ impl Builder {
         group.0(self)
     }
 
-    fn run_erased<T: Task>(builder: &Builder, task: SerializedTask) -> SerializedResult {
-        let task = SerializedTask::to_task::<T>(&task);
-        let value = T::run(builder, key);
-        SerializedResult::new::<T>(value)
+    fn run_erased<T: Task>(builder: &Builder, task: &SerializedTask) -> SerializedResult {
+        let value = T::run(builder, task.to_task::<T>());
+        SerializedResult::new::<T>(&value)
     }
 
     pub fn register_task<T: Task>(&mut self) {
