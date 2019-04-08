@@ -4,6 +4,7 @@ version = "0.0.1"
 authors = ["John Kåre Alsaker <john.kare.alsaker@gmail.com>"]
 description = "build system"
 license = "MIT"
+edition = "2018"
 
 [dependencies]
 lazy_static = "1.0.0"

@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::{Mutex};
 use std::collections::{HashMap};
 use std::convert::AsRef;
-use tasks;
+use crate::tasks;
 
 #[derive(Eq, PartialEq, Hash, Copy, Clone, Debug)]
 pub struct Symbol(pub &'static str);
@@ -70,9 +70,12 @@ pub fn mtime_untracked(path: &Path) -> SystemTime {
 }
 
 tasks! {
+    builder_var: builder;
     pub group Tasks;
 
-    pub task use_mtime(path: PathBuf) -> SystemTime {
+    pub task Mtime {
+        path: PathBuf,
+    } -> SystemTime {
         println!("checking mtime of {:?}", path);
         mtime_untracked(&path)
     }
