@@ -164,6 +164,7 @@ impl SerializedResult {
 struct DepNode {
     name: Symbol,
     eval_always: bool,
+    early_cutoff: bool,
     task: SerializedTask,
 }
 
@@ -172,6 +173,7 @@ impl DepNode {
         DepNode {
             name: Symbol(T::IDENTIFIER),
             eval_always: T::EVAL_ALWAYS,
+            early_cutoff: T::EARLY_CUTOFF,
             task: SerializedTask::new(task),
         }
     }
@@ -200,7 +202,6 @@ enum DepNodeChanges {
 
 enum DepNodeState {
     Cached(DepNodeData),
-    Outdated,
     Active(JobHandle),
     Panicked,
     Fresh(DepNodeData, DepNodeChanges),
@@ -275,7 +276,7 @@ impl Builder {
                     //println!("saving {:?} {:?}", node, data);
                     graph.push((node, data))
                 }
-                DepNodeState::Panicked | DepNodeState::Outdated => (),
+                DepNodeState::Panicked => (),
                 DepNodeState::Active(..) => panic!(),
             }
         }

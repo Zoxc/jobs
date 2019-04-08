@@ -15,7 +15,7 @@ fn force_and_check(builder: &Builder, dep_node: &DepNode) -> bool {
 
     // Check if its still outdated
     match state!(builder, &dep_node) {
-        DepNodeState::Outdated | DepNodeState::Cached(..) | DepNodeState::Active(..) => panic!(),
+        DepNodeState::Cached(..) | DepNodeState::Active(..) => panic!(),
         DepNodeState::Panicked => false,
         DepNodeState::Fresh(_, DepNodeChanges::Unchanged) => true,
         DepNodeState::Fresh(_, DepNodeChanges::Changed) => false,
@@ -34,7 +34,7 @@ fn try_mark_up_to_date(builder: &Builder, dep_node: &DepNode) -> bool {
                 // Await the result and then retry
                 handle.clone()
             }
-            DepNodeState::Outdated | DepNodeState::Panicked => return false,
+            DepNodeState::Panicked => return false,
             DepNodeState::Cached(ref data) => break data.deps.from.clone(),
             DepNodeState::Fresh(_, changes) => return changes == DepNodeChanges::Unchanged,
         };
@@ -49,7 +49,7 @@ fn try_mark_up_to_date(builder: &Builder, dep_node: &DepNode) -> bool {
         let state_map = &mut state_map!(builder);
         let state = state_map.get_mut(&dep_node).unwrap();
         let new = match *state {
-            DepNodeState::Outdated | DepNodeState::Panicked | DepNodeState::Active(..) => panic!(),
+            DepNodeState::Panicked | DepNodeState::Active(..) => panic!(),
             DepNodeState::Cached(ref data) => {
                 Some(DepNodeState::Fresh(data.clone(), DepNodeChanges::Unchanged))
             }
@@ -82,7 +82,6 @@ fn force(
                 let action = match *entry.get() {
                     DepNodeState::Active(ref handle) => Action::Await(handle.clone()),
                     DepNodeState::Fresh(..) | DepNodeState::Panicked => return,
-                    DepNodeState::Outdated => Action::Create(JobHandle::new(), None),
                     DepNodeState::Cached(ref data) => {
                         Action::Create(JobHandle::new(), Some(data.result.clone()))
                     }
@@ -117,9 +116,10 @@ fn force(
                             dep_node.name
                         );
                     }
-                    let changes = if old_result
-                        .map(|old_result| old_result == result)
-                        .unwrap_or(false)
+                    let changes = if dep_node.early_cutoff
+                        && old_result
+                            .map(|old_result| old_result == result)
+                            .unwrap_or(false)
                     {
                         DepNodeChanges::Unchanged
                     } else {
@@ -179,9 +179,7 @@ impl Builder {
             // Try to bring the cached result up to date
             if !try_mark_up_to_date(self, &dep_node) {
                 let outdated = match state!(self, &dep_node) {
-                    DepNodeState::Outdated
-                    | DepNodeState::Cached(..)
-                    | DepNodeState::Active(..) => true,
+                    DepNodeState::Cached(..) | DepNodeState::Active(..) => true,
                     DepNodeState::Panicked | DepNodeState::Fresh(..) => false,
                 };
                 if outdated {
@@ -195,9 +193,7 @@ impl Builder {
         }
 
         match *self.cached.lock().unwrap().get(&dep_node).unwrap() {
-            DepNodeState::Outdated | DepNodeState::Cached(..) | DepNodeState::Active(..) => {
-                panic!()
-            }
+            DepNodeState::Cached(..) | DepNodeState::Active(..) => panic!(),
             DepNodeState::Panicked => (),
             DepNodeState::Fresh(ref data, _) => return data.result.to_result::<T>(),
         };
