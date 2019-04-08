@@ -220,7 +220,7 @@ struct Graph {
 
 pub struct Builder {
     index: PathBuf,
-    forcers: HashMap<Symbol, fn(&Builder, &SerializedTask) -> SerializedResult>,
+    task_executors: HashMap<Symbol, fn(&Builder, &SerializedTask) -> SerializedResult>,
     cached: Mutex<HashMap<DepNode, DepNodeState>>,
 }
 
@@ -235,14 +235,14 @@ impl Builder {
     }
 
     pub fn register_task<T: Task>(&mut self) {
-        self.forcers
+        self.task_executors
             .insert(Symbol(T::IDENTIFIER), Builder::run_erased::<T>);
     }
 
     pub fn new(path: &Path) -> Self {
         let mut builder = Builder {
             index: path.to_path_buf(),
-            forcers: HashMap::new(),
+            task_executors: HashMap::new(),
             cached: Mutex::new(HashMap::new()),
         };
         builder.register(util::TASKS);
