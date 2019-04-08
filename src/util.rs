@@ -1,26 +1,31 @@
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::fs;
-use std::fmt;
-use std::ops::Deref;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::sync::{Mutex};
-use std::collections::{HashMap};
-use std::convert::AsRef;
 use crate::tasks;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
+use std::convert::AsRef;
+use std::fmt;
+use std::fs;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Eq, PartialEq, Hash, Copy, Clone, Debug)]
 pub struct Symbol(pub &'static str);
 
 impl Symbol {
     pub fn new(s: &str) -> Self {
-        *INTERNER.lock().unwrap().entry(s.to_string()).or_insert_with(|| {
-            Symbol(Box::leak(s.to_string().into_boxed_str()))
-        })
+        *INTERNER
+            .lock()
+            .unwrap()
+            .entry(s.to_string())
+            .or_insert_with(|| Symbol(Box::leak(s.to_string().into_boxed_str())))
     }
 }
 
-impl<T: ?Sized> AsRef<T> for Symbol where str: AsRef<T> {
+impl<T: ?Sized> AsRef<T> for Symbol
+where
+    str: AsRef<T>,
+{
     fn as_ref(&self) -> &T {
         self.0.as_ref()
     }
@@ -36,7 +41,7 @@ impl Deref for Symbol {
 impl Serialize for Symbol {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer
+        S: Serializer,
     {
         self.0.to_string().serialize(serializer)
     }
@@ -44,8 +49,8 @@ impl Serialize for Symbol {
 
 impl<'de> Deserialize<'de> for Symbol {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>
+    where
+        D: Deserializer<'de>,
     {
         let r = <String as Deserialize<'de>>::deserialize(deserializer);
         r.map(|s| Symbol::new(&s))
@@ -59,14 +64,14 @@ impl fmt::Display for Symbol {
 }
 
 lazy_static! {
-    static ref INTERNER: Mutex<HashMap<String, Symbol>> = {
-        Mutex::new(HashMap::new())
-    };
+    static ref INTERNER: Mutex<HashMap<String, Symbol>> = { Mutex::new(HashMap::new()) };
 }
 
 /// Returns the last-modified time for `path`, or zero if it doesn't exist.
 pub fn mtime_untracked(path: &Path) -> SystemTime {
-    fs::metadata(path).and_then(|f| f.modified()).unwrap_or(UNIX_EPOCH)
+    fs::metadata(path)
+        .and_then(|f| f.modified())
+        .unwrap_or(UNIX_EPOCH)
 }
 
 tasks! {
@@ -81,4 +86,3 @@ tasks! {
         mtime_untracked(&path)
     }
 }
-

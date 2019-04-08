@@ -2,8 +2,8 @@ use std::collections::hash_map::Entry;
 use std::panic;
 
 use crate::{
-    DEPS, DepNode, Builder, JobHandle, DepNodeData, DepNodeState, PanickedJob,
-    DepNodeChanges, Task, SerializedTask, SerializedResult,
+    Builder, DepNode, DepNodeChanges, DepNodeData, DepNodeState, JobHandle, PanickedJob,
+    SerializedResult, SerializedTask, Task, DEPS,
 };
 
 fn force_and_check(builder: &Builder, dep_node: &DepNode) -> bool {
@@ -15,9 +15,7 @@ fn force_and_check(builder: &Builder, dep_node: &DepNode) -> bool {
 
     // Check if its still outdated
     match state!(builder, &dep_node) {
-        DepNodeState::Outdated |
-        DepNodeState::Cached(..) |
-        DepNodeState::Active(..) => panic!(),
+        DepNodeState::Outdated | DepNodeState::Cached(..) | DepNodeState::Active(..) => panic!(),
         DepNodeState::Panicked => false,
         DepNodeState::Fresh(_, DepNodeChanges::Unchanged) => true,
         DepNodeState::Fresh(_, DepNodeChanges::Changed) => false,
@@ -36,28 +34,28 @@ fn try_mark_up_to_date(builder: &Builder, dep_node: &DepNode) -> bool {
                 // Await the result and then retry
                 handle.clone()
             }
-            DepNodeState::Outdated |
-            DepNodeState::Panicked => return false,
+            DepNodeState::Outdated | DepNodeState::Panicked => return false,
             DepNodeState::Cached(ref data) => break data.deps.from.clone(),
             DepNodeState::Fresh(_, changes) => return changes == DepNodeChanges::Unchanged,
         };
         handle.await_task();
     };
-    let up_to_date = deps.into_iter().all(|node| try_mark_up_to_date(builder, &node));
+    let up_to_date = deps
+        .into_iter()
+        .all(|node| try_mark_up_to_date(builder, &node));
 
     if up_to_date {
         // Mark the node as green
         let state_map = &mut state_map!(builder);
         let state = state_map.get_mut(&dep_node).unwrap();
         let new = match *state {
-            DepNodeState::Outdated |
-            DepNodeState::Panicked |
-            DepNodeState::Active(..) => panic!(),
-            DepNodeState::Cached(ref data) => Some(DepNodeState::Fresh(data.clone(),
-                                                                          DepNodeChanges::Unchanged)),
+            DepNodeState::Outdated | DepNodeState::Panicked | DepNodeState::Active(..) => panic!(),
+            DepNodeState::Cached(ref data) => {
+                Some(DepNodeState::Fresh(data.clone(), DepNodeChanges::Unchanged))
+            }
             DepNodeState::Fresh(_, DepNodeChanges::Changed) => panic!(),
             // Someone else marked it as unchanged already
-            DepNodeState::Fresh(_, DepNodeChanges::Unchanged) => None, 
+            DepNodeState::Fresh(_, DepNodeChanges::Unchanged) => None,
         };
         if let Some(new) = new {
             *state = new;
@@ -83,8 +81,7 @@ fn force(
             Entry::Occupied(mut entry) => {
                 let action = match *entry.get() {
                     DepNodeState::Active(ref handle) => Action::Await(handle.clone()),
-                    DepNodeState::Fresh(..) |
-                    DepNodeState::Panicked => return,
+                    DepNodeState::Fresh(..) | DepNodeState::Panicked => return,
                     DepNodeState::Outdated => Action::Create(JobHandle::new(), None),
                     DepNodeState::Cached(ref data) => {
                         Action::Create(JobHandle::new(), Some(data.result.clone()))
@@ -114,22 +111,26 @@ fn force(
                     let deps = handle.drain_deps();
                     //println!("gots deps {:?} for node {:?}", deps, dep_node);
                     if deps.from.is_empty() && !dep_node.eval_always {
-                        eprintln!("warning: task `{}` has no dependencies \
-                                   and isn't an #[eval_always] task, it won't be executed again", dep_node.name);
+                        eprintln!(
+                            "warning: task `{}` has no dependencies \
+                             and isn't an #[eval_always] task, it won't be executed again",
+                            dep_node.name
+                        );
                     }
-                    let changes = if old_result.map(|old_result| old_result == result).unwrap_or(false) {
+                    let changes = if old_result
+                        .map(|old_result| old_result == result)
+                        .unwrap_or(false)
+                    {
                         DepNodeChanges::Unchanged
                     } else {
                         DepNodeChanges::Changed
                     };
-                    (DepNodeState::Fresh(DepNodeData {
-                        deps,
-                        result,
-                    }, changes), None)
+                    (
+                        DepNodeState::Fresh(DepNodeData { deps, result }, changes),
+                        None,
+                    )
                 }
-                Err(panic) => {
-                    (DepNodeState::Panicked, Some(panic))
-                }
+                Err(panic) => (DepNodeState::Panicked, Some(panic)),
             };
 
             {
@@ -178,11 +179,10 @@ impl Builder {
             // Try to bring the cached result up to date
             if !try_mark_up_to_date(self, &dep_node) {
                 let outdated = match state!(self, &dep_node) {
-                    DepNodeState::Outdated |
-                    DepNodeState::Cached(..) |
-                    DepNodeState::Active(..) => true,
-                    DepNodeState::Panicked |
-                    DepNodeState::Fresh(..) => false,
+                    DepNodeState::Outdated
+                    | DepNodeState::Cached(..)
+                    | DepNodeState::Active(..) => true,
+                    DepNodeState::Panicked | DepNodeState::Fresh(..) => false,
                 };
                 if outdated {
                     // The result was outdated, force the task to run
@@ -195,13 +195,11 @@ impl Builder {
         }
 
         match *self.cached.lock().unwrap().get(&dep_node).unwrap() {
-            DepNodeState::Outdated |
-            DepNodeState::Cached(..) |
-            DepNodeState::Active(..) => panic!(),
-            DepNodeState::Panicked => (),
-            DepNodeState::Fresh(ref data, _) => {
-                return data.result.to_result::<T>()
+            DepNodeState::Outdated | DepNodeState::Cached(..) | DepNodeState::Active(..) => {
+                panic!()
             }
+            DepNodeState::Panicked => (),
+            DepNodeState::Fresh(ref data, _) => return data.result.to_result::<T>(),
         };
         // Panic here so we don't poison the lock
         panic::resume_unwind(Box::new(PanickedJob))

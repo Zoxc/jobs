@@ -1,25 +1,25 @@
 extern crate core;
 #[macro_use]
 extern crate lazy_static;
+extern crate bincode;
+extern crate serde;
 extern crate serde_derive;
 extern crate serde_json;
-extern crate serde;
-extern crate bincode;
 #[macro_use]
 extern crate scoped_tls;
 
 // Allows macros to refer to this crate as `::jobs`
 extern crate self as jobs;
 
-use std::sync::{Arc, Mutex, Condvar};
-use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
-use std::path::{Path, PathBuf};
-use std::panic;
-use std::fs::{File};
-use std::io::{Write, Read};
 use serde::{Deserialize, Serialize};
 pub use serde_derive::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::hash::Hash;
+use std::io::{Read, Write};
+use std::panic;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
 
 pub use bincode::{deserialize, serialize};
 pub use util::Symbol;
@@ -27,17 +27,21 @@ pub use util::Symbol;
 pub struct PanickedJob;
 
 macro_rules! state_map {
-    ($builder:expr) => (*$builder.cached.lock().unwrap())
+    ($builder:expr) => {
+        *$builder.cached.lock().unwrap()
+    };
 }
 
 macro_rules! state {
-    ($builder:expr, $dep_node:expr) => (*state_map!($builder).get($dep_node).unwrap())
+    ($builder:expr, $dep_node:expr) => {
+        *state_map!($builder).get($dep_node).unwrap()
+    };
 }
 
-pub mod util;
 mod execute;
+pub mod util;
 
-pub struct TaskGroup(pub fn (&mut Builder));
+pub struct TaskGroup(pub fn(&mut Builder));
 
 pub trait Task: Eq + Serialize + for<'a> Deserialize<'a> + Hash + Send + Clone + 'static {
     /// An unique string identifying the task
@@ -210,7 +214,7 @@ struct DepNodeData {
 
 #[derive(Serialize, Deserialize)]
 struct Graph {
-    data: Vec<(DepNode, DepNodeData)>
+    data: Vec<(DepNode, DepNodeData)>,
 }
 
 pub struct Builder {
@@ -230,7 +234,8 @@ impl Builder {
     }
 
     pub fn register_task<T: Task>(&mut self) {
-        self.forcers.insert(Symbol(T::IDENTIFIER), Builder::run_erased::<T>);
+        self.forcers
+            .insert(Symbol(T::IDENTIFIER), Builder::run_erased::<T>);
     }
 
     pub fn new(path: &Path) -> Self {
@@ -266,13 +271,11 @@ impl Builder {
         let map = self.cached.into_inner().unwrap();
         for (node, state) in map.into_iter() {
             match state {
-                DepNodeState::Cached(data) |
-                DepNodeState::Fresh(data, _)  => {
+                DepNodeState::Cached(data) | DepNodeState::Fresh(data, _) => {
                     //println!("saving {:?} {:?}", node, data);
-                graph.push((node, data))
-            },
-                DepNodeState::Panicked |
-                DepNodeState::Outdated => (),
+                    graph.push((node, data))
+                }
+                DepNodeState::Panicked | DepNodeState::Outdated => (),
                 DepNodeState::Active(..) => panic!(),
             }
         }
@@ -291,7 +294,11 @@ pub struct JobHandle(Arc<(Mutex<bool>, Condvar, Mutex<Deps>)>);
 
 impl JobHandle {
     fn new() -> Self {
-        JobHandle(Arc::new((Mutex::new(false), Condvar::new(), Mutex::new(Deps::empty()))))
+        JobHandle(Arc::new((
+            Mutex::new(false),
+            Condvar::new(),
+            Mutex::new(Deps::empty()),
+        )))
     }
 
     fn await_task(&self) {
