@@ -209,6 +209,7 @@ struct Graph {
 }
 
 pub struct Builder {
+    jobserver: jobserver::Client,
     index: PathBuf,
     task_executors: HashMap<Symbol, fn(&Builder, &SerializedTask) -> SerializedResult>,
     cached: Mutex<HashMap<DepNode, DepNodeState>>,
@@ -231,6 +232,15 @@ impl Builder {
 
     pub fn new(path: &Path) -> Self {
         let mut builder = Builder {
+            jobserver: unsafe {
+                jobserver::Client::from_env().unwrap_or_else(|| {
+                    let client = jobserver::Client::new(num_cpus::get())
+                        .expect("failed to create jobserver");
+                    // Acquire a token for the current thread
+                    client.acquire_raw().ok();
+                    client
+                })
+            },
             index: path.to_path_buf(),
             task_executors: HashMap::new(),
             cached: Mutex::new(HashMap::new()),
