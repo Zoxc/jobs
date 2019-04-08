@@ -1,7 +1,6 @@
 #![feature(use_extern_macros)]
 #![feature(proc_macro)]
 
-extern crate jobs_proc_macro;
 extern crate core;
 #[macro_use]
 extern crate lazy_static;
@@ -13,86 +12,43 @@ extern crate bincode;
 #[macro_use]
 extern crate scoped_tls;
 
+// Allows macros to refer to this crate as `::jobs`
+extern crate self as jobs;
+
 use std::sync::{Arc, Mutex, Condvar};
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::panic;
-use std::fs::{self, File};
+use std::fs::{File};
 use std::io::{Write, Read};
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::fmt;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
-mod jobs { pub use super::*; }
-
-pub use jobs_proc_macro::job;
 pub use bincode::{deserialize, serialize};
-
-#[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
-struct HelloT {
-    test: PathBuf,
-    time: SystemTime,
-}
-
+pub use util::Symbol;
 
 pub struct PanickedJob;
 
-/// Returns the last-modified time for `path`, or zero if it doesn't exist.
-fn mtime(path: &Path) -> SystemTime {
-    fs::metadata(path).and_then(|f| f.modified()).unwrap_or(UNIX_EPOCH)
-}
+pub mod util;
 
-#[job(input)]
-pub fn use_mtime(path: PathBuf) -> SystemTime {
-    println!("checking mtime of {:?}", path);
-    mtime(&path)
-}
+pub struct TaskGroup(fn (&mut Builder));
 
+#[macro_export]
+macro_rules! tasks {
+    ($gvis:vis group $group:ident; $($tvis:vis task $name:ident $arg:tt -> $res:ty { $($body:tt)* })*) => {
+        $gvis const $group: ::jobs::TaskGroup = {
+            fn register() {
 
-#[derive(Eq, PartialEq, Hash, Copy, Clone, Debug)]
-pub struct DepNodeName(pub &'static str);
+            }
 
-impl Serialize for DepNodeName {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer
-    {
-        self.0.to_string().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for DepNodeName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>
-    {
-        let r = <String as Deserialize<'de>>::deserialize(deserializer);
-        r.map(|s| {
-            *INTERNER.lock().unwrap().entry(s.clone()).or_insert_with(|| {
-                DepNodeName(Box::leak(s.into_boxed_str()))
-            })
-        })
-    }
-}
-
-impl fmt::Display for DepNodeName {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-lazy_static! {
-    static ref INTERNER: Mutex<HashMap<String, DepNodeName>> = {
-        Mutex::new(HashMap::new())
+            ::job::TaskGroup(register)
+        };
     };
 }
 
-
 #[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
 struct DepNode {
-    name: DepNodeName,
+    name: Symbol,
     input: bool,
     key: Vec<u8>,
 }
@@ -135,7 +91,7 @@ struct DepNodeData {
 }
 
 struct Builder {
-    forcers: Mutex<HashMap<DepNodeName, fn(Vec<u8>) -> JobValue>>,
+    forcers: Mutex<HashMap<Symbol, fn(Vec<u8>) -> JobValue>>,
     cached: Mutex<HashMap<DepNode, DepNodeState>>,
 }
 
@@ -145,7 +101,7 @@ struct Graph {
 }
 
 pub trait RecheckResultOfJob {
-    fn forcer() -> (DepNodeName, fn(Vec<u8>) -> JobValue);
+    fn forcer() -> (Symbol, fn(Vec<u8>) -> JobValue);
 }
 
 pub fn recheck_result_of<T: RecheckResultOfJob>() {
@@ -154,7 +110,7 @@ pub fn recheck_result_of<T: RecheckResultOfJob>() {
 }
 
 pub fn setup() {
-    recheck_result_of::<use_mtime>();
+    recheck_result_of::<util::use_mtime>();
     load();
 }
 
@@ -171,7 +127,7 @@ pub fn load() {
     let data = bincode::deserialize::<Graph>(&data).unwrap();
     let map = &mut *BUILDER.cached.lock().unwrap();
     for (node, data) in data.data {
-        println!("loading {:?} {:?}", node, data);
+        //println!("loading {:?} {:?}", node, data);
         map.insert(node, DepNodeState::Cached(data));
     }
 }
@@ -183,7 +139,7 @@ pub fn save() {
         match *state {
             DepNodeState::Cached(ref data) |
             DepNodeState::Fresh(ref data, _)  => {
-                println!("saving {:?} {:?}", node, data);
+                //println!("saving {:?} {:?}", node, data);
              graph.push((node.clone(), data.clone()))
         },
             DepNodeState::Panicked |
@@ -372,7 +328,11 @@ fn force<
             let (new_state, panic) = match result {
                 Ok(value) => {
                     let deps = handle.drain_deps();
-                    println!("gots deps {:?} for node {:?}", deps, dep_node);
+                    //println!("gots deps {:?} for node {:?}", deps, dep_node);
+                    if deps.from.is_empty() && !dep_node.input {
+                        eprintln!("warning: job `{}` has no dependencies \
+                                   and isn't an input, it won't be executed again", dep_node.name);
+                    }
                     let changes = if old_value.map(|old_value| old_value == value).unwrap_or(false) {
                         DepNodeChanges::Unchanged
                     } else {
@@ -414,7 +374,7 @@ pub fn execute_job<
     K: Eq + Serialize + for<'a> Deserialize<'a> + Hash + Send + Clone + 'static,
     V: Send + Clone + Serialize + for<'a> Deserialize<'a> + 'static,
     C: (FnOnce(K) -> V) + 'static, 
-> (name: DepNodeName, input: bool, key: K, compute_orig: C) -> V {
+> (name: Symbol, input: bool, key: K, compute_orig: C) -> V {
     let compute = move |key: Vec<u8>| -> JobValue {
         let key = bincode::deserialize::<K>(&key).unwrap();
         let value = compute_orig(key);
@@ -428,7 +388,7 @@ pub fn execute_job<
     };
 
     if DEPS.is_set() {
-        println!("adding dep {:?}", dep_node);
+        //println!("adding dep {:?}", dep_node);
         DEPS.with(|deps| deps.lock().unwrap().from.insert(dep_node.clone()));
     }
 

@@ -2,23 +2,26 @@
 #![feature(proc_macro, match_default_bindings)]
 #![recursion_limit = "128"]
 
-extern crate proc_macro2;
+//extern crate proc_macro2;
 extern crate proc_macro;
 #[macro_use]
 extern crate quote;
 extern crate syn;
 
-use proc_macro2::Span;
-use proc_macro::{TokenStream, TokenNode};
+//use proc_macro2::Span;
+use proc_macro::{TokenStream, Span};
 use quote::{Tokens, ToTokens};
 use syn::*;
 use syn::punctuated::Punctuated;
 use syn::fold::Fold;
 
 macro_rules! quote_cs {
+    ($($t:tt)*) => (quote!($($t)*))
+}
+/*
+macro_rules! quote_cs {
     ($($t:tt)*) => (quote_spanned!(Span::call_site() => $($t)*))
 }
-
 fn first_last(tokens: &ToTokens) -> (Span, Span) {
     let mut spans = Tokens::new();
     tokens.to_tokens(&mut spans);
@@ -39,7 +42,7 @@ fn respan(input: proc_macro2::TokenStream,
     }
     new_tokens.into_iter().collect()
 }
-
+*/
 fn async_inner(
     input: bool,
     function: TokenStream,
@@ -166,10 +169,9 @@ fn async_inner(
     let args_c = args.clone();
     let types_c = types.clone();
     let gen_body_inner = quote_cs! {
-        let __name = ::jobs::DepNodeName(concat!(module_path!(), "::", stringify!(#ident)));
-        let __compute = move |(#(#patterns,)*): (#(#types_c,)*)| #block;
-        let __key = (#(#args_c,)*);
-        ::jobs::execute_job(__name, #input, __key, __compute)
+        let name = ::jobs::Symbol(concat!(module_path!(), "::", stringify!(#ident)));
+        let key = (#(#args_c,)*);
+        ::jobs::execute_job(name, #input, key, #ident::execute)
     };
     let mut gen_body = Tokens::new();
     block.brace_token.surround(&mut gen_body, |tokens| {
@@ -201,20 +203,26 @@ fn async_inner(
         body_inner.to_tokens(tokens);
     });
 */
+    let types_c = types.clone();
+    let types_c2 = types.clone();
     let output = quote_cs! {
         #[allow(non_camel_case_types)]
         #vis struct #ident {}
         impl #ident {
-            fn execute(key: Vec<u8>) -> Vec<u8> {
-                let key = ::jobs::deserialize::<bool>(&key).unwrap();
-                let value = true;//compute_orig(key);
+            fn execute((#(#patterns,)*): (#(#types_c,)*)) #output {
+                #block
+            }
+
+            fn execute_erased(key: Vec<u8>) -> Vec<u8> {
+                let key = ::jobs::deserialize::<(#(#types_c2,)*)>(&key).unwrap();
+                let value = #ident::execute(key);
                 ::jobs::serialize(&value).unwrap()
             }
         }
         impl ::jobs::RecheckResultOfJob for #ident {
-            fn forcer() -> (::jobs::DepNodeName, fn(Vec<u8>) -> Vec<u8>) {
-                let name = ::jobs::DepNodeName(concat!(module_path!(), "::", stringify!(#ident)));
-                (name, #ident::execute)
+            fn forcer() -> (::jobs::Symbol, fn(Vec<u8>) -> Vec<u8>) {
+                let name = ::jobs::Symbol(concat!(module_path!(), "::", stringify!(#ident)));
+                (name, #ident::execute_erased)
             }
         }
         #(#attrs)*
@@ -231,7 +239,6 @@ fn async_inner(
 
 #[proc_macro_attribute]
 pub fn job(attribute: TokenStream, function: TokenStream) -> TokenStream {
-    eprintln!("ATTR {}", &attribute.to_string() as &str);
     let input = match &attribute.to_string() as &str {
         "" => false,
         "( input )" => true,
@@ -239,6 +246,6 @@ pub fn job(attribute: TokenStream, function: TokenStream) -> TokenStream {
     };
 
     let r = async_inner(input, function, quote_cs! { ::futures::__rt::gen_pinned });
-    eprintln!("OUTPUT ```\n{}\n```", r);
+    //eprintln!("OUTPUT ```\n{}\n```", r);
     r
 }

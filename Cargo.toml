@@ -6,7 +6,6 @@ description = "build system"
 license = "MIT"
 
 [dependencies]
-jobs-proc-macro = { path = "jobs-proc-macro", version = "0.0.1" }
 lazy_static = "1.0.0"
 bincode = "1.0.0"
 serde_json = "1.0"
