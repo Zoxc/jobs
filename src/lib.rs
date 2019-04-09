@@ -31,6 +31,7 @@ pub use util::Symbol;
 mod execute;
 pub mod parallel;
 pub mod util;
+pub mod cmd;
 
 pub struct PanickedTask;
 
@@ -243,6 +244,12 @@ impl Builder {
 
     pub fn aborted(&self) -> bool {
         self.aborted.load(Ordering::Acquire)
+    }
+
+    pub fn unwind_if_aborted(&self) {
+        if self.aborted() {
+            panic::resume_unwind(Box::new(PanickedTask));
+        }
     }
 
     pub fn handle_ctrlc(&self) {
