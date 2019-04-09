@@ -19,8 +19,11 @@ use std::fs::File;
 use std::hash::Hash;
 use std::io::{Read, Write};
 use std::panic;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::fmt::Debug;
 
 pub use bincode::{deserialize, serialize};
 pub use util::Symbol;
@@ -33,7 +36,7 @@ pub struct PanickedTask;
 
 pub struct TaskGroup(pub fn(&mut Builder));
 
-pub trait Task: Eq + Serialize + for<'a> Deserialize<'a> + Hash + Send + Clone + 'static {
+pub trait Task: Eq + Serialize + for<'a> Deserialize<'a> + Hash + Send + Clone + Debug + 'static {
     /// An unique string identifying the task
     const IDENTIFIER: &'static str;
 
@@ -209,8 +212,10 @@ struct Graph {
 }
 
 pub struct Builder {
+    aborted: Arc<AtomicBool>,
     jobserver: jobserver::Client,
     index: PathBuf,
+    task_printers: HashMap<Symbol, fn(&SerializedTask) -> String>,
     task_executors: HashMap<Symbol, fn(&Builder, &SerializedTask) -> SerializedResult>,
     cached: Mutex<HashMap<DepNode, DepNodeState>>,
 }
@@ -225,13 +230,32 @@ impl Builder {
         SerializedResult::new::<T>(&value)
     }
 
+    fn print_task<T: Task>(task: &SerializedTask) -> String {
+        format!("{:?}", task.to_task::<T>())
+    }
+
     pub fn register_task<T: Task>(&mut self) {
+        self.task_printers
+            .insert(Symbol(T::IDENTIFIER), Builder::print_task::<T>);
         self.task_executors
             .insert(Symbol(T::IDENTIFIER), Builder::run_erased::<T>);
     }
 
+    pub fn aborted(&self) -> bool {
+        self.aborted.load(Ordering::Acquire)
+    }
+
+    pub fn handle_ctrlc(&self) {
+        let aborted = self.aborted.clone();
+        ctrlc::set_handler(move || {
+            aborted.store(true, Ordering::Release);
+            eprintln!("Aborting builder...");
+        }).expect("Setting up Ctrl-C handler");
+    }
+
     pub fn new(path: &Path) -> Self {
         let mut builder = Builder {
+            aborted: Arc::new(AtomicBool::new(false)),
             jobserver: unsafe {
                 jobserver::Client::from_env().unwrap_or_else(|| {
                     let client = jobserver::Client::new(num_cpus::get())
@@ -242,6 +266,7 @@ impl Builder {
                 })
             },
             index: path.to_path_buf(),
+            task_printers: HashMap::new(),
             task_executors: HashMap::new(),
             cached: Mutex::new(HashMap::new()),
         };
@@ -267,9 +292,13 @@ impl Builder {
         builder
     }
 
-    pub fn save(self) {
+    pub fn invalidate<T: Task>(&mut self, task: T) {
+        self.cached.get_mut().remove(&DepNode::new(&task));
+    }
+
+    fn save(&mut self) {
         let mut graph = Vec::new();
-        let map = self.cached.into_inner();
+        let map = mem::replace(self.cached.get_mut(), HashMap::new());
         for (node, state) in map.into_iter() {
             match state {
                 DepNodeState::Cached(data) | DepNodeState::Fresh(data, _) => {
@@ -282,11 +311,17 @@ impl Builder {
         }
         let graph = Graph { data: graph };
         let data = bincode::serialize(&graph).unwrap();
-        let mut file = File::create(self.index).unwrap();
+        let mut file = File::create(&self.index).unwrap();
         file.write_all(&data).unwrap();
         let data = serde_json::to_string_pretty(&graph).unwrap();
         let mut file = File::create("build-index.json").unwrap();
         file.write_all(data.as_bytes()).unwrap();
+    }
+}
+
+impl Drop for Builder {
+    fn drop(&mut self) {
+        self.save();
     }
 }
 

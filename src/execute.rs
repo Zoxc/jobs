@@ -105,6 +105,12 @@ impl Builder {
         match action {
             Action::Create(handle, old_result) => {
                 let deps = Mutex::new(Deps::empty());
+                let print = self.task_printers.get(&dep_node.name).unwrap();
+
+                println!(
+                    "running `{}`",
+                    print(&dep_node.task)
+                );
                 let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                     DEPS.set(&deps, || compute(self, &dep_node.task))
                 }));
@@ -114,10 +120,12 @@ impl Builder {
                         let deps = deps.into_inner();
                         //println!("gots deps {:?} for node {:?}", deps, dep_node);
                         if deps.from.is_empty() && !dep_node.eval_always {
+                            let print = self.task_printers.get(&dep_node.name).unwrap();
+
                             eprintln!(
                                 "warning: task `{}` has no dependencies \
                                  and isn't an #[eval_always] task, it won't be executed again",
-                                dep_node.name
+                                print(&dep_node.task)
                             );
                         }
                         let changes = if dep_node.early_cutoff
