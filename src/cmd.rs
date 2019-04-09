@@ -1,7 +1,6 @@
-use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
-use std::collections::hash_map::Entry;
-use std::panic;
-use std::process::Command;
+use std::process::{ExitStatus, Command, Output, Child};
+use std::io;
+use crate::Builder;
 
 pub struct CommandRunner<'a, 'b> {
     builder: &'a Builder,
@@ -27,12 +26,12 @@ impl CommandRunner<'_, '_> {
 }
 
 impl Builder {
-    pub fn cmd(&'a self, cmd: &'b mut Command) -> CommandRunner<'a, 'b> {
+    pub fn cmd<'a, 'b>(&'a self, cmd: &'b mut Command) -> CommandRunner<'a, 'b> {
         // Tell the process about our jobserver
         self.jobserver.configure(cmd);
 
         CommandRunner {
-            builder,
+            builder: self,
             cmd,
         }
     }
