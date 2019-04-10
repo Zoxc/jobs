@@ -188,19 +188,11 @@ impl Deps {
     }
 }
 
-// FIXME: Can we remove this and just check if DepNodeData.session = Builder.session
-// Might want this as a short-circuit
-#[derive(Copy, Clone, Eq, PartialEq)]
-enum DepNodeChanges {
-    Unchanged,
-    Changed,
-}
-
 enum DepNodeState {
     Cached(DepNodeData),
     Active(ActiveTaskHandle),
     Panicked,
-    Fresh(DepNodeData, DepNodeChanges),
+    Fresh(DepNodeData),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -315,7 +307,7 @@ impl Builder {
         let map = mem::replace(self.cached.get_mut(), HashMap::new());
         for (node, state) in map.into_iter() {
             match state {
-                DepNodeState::Cached(data) | DepNodeState::Fresh(data, _) => {
+                DepNodeState::Cached(data) | DepNodeState::Fresh(data) => {
                     //println!("saving {:?} {:?}", node, data);
                     graph.push((node, data))
                 }

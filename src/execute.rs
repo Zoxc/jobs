@@ -2,9 +2,10 @@ use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use std::collections::hash_map::Entry;
 use std::panic;
 use std::cmp;
+use std::mem;
 
 use crate::{
-    ActiveTaskHandle, Builder, DepNode, DepNodeChanges, DepNodeData, DepNodeState, Deps,
+    ActiveTaskHandle, Builder, DepNode, DepNodeData, DepNodeState, Deps,
     PanickedTask, SerializedResult, Task, DEPS,
 };
 
@@ -34,12 +35,8 @@ impl Builder {
                 }
                 DepNodeState::Panicked => return Age::Stale,
                 DepNodeState::Cached(ref data) => break (data.session, data.deps.from.clone()),
-                DepNodeState::Fresh(ref data, changes) => {
-                    return if changes == DepNodeChanges::Unchanged {
-                        Age::Session(data.session)
-                    } else {
-                        Age::Stale
-                    }
+                DepNodeState::Fresh(ref data) => {
+                    return Age::Session(data.session)
                 }
             };
             handle.await_task();
@@ -69,29 +66,24 @@ impl Builder {
         }).unwrap_or(true);
 
         if up_to_date {
-            // Mark the node as green
-            // FIXME: Get rid of Cached / Fresh and just store the `session` instead?
-            let state_map = &mut *self.cached.lock();
-            let state = state_map.get_mut(&dep_node).unwrap();
-            let new = match *state {
+            // Mark the node as fresh
+            let mut state = self.node_state(dep_node);
+            let old_state = mem::replace(&mut *state, DepNodeState::Panicked);
+            *state = match old_state {
                 DepNodeState::Panicked | DepNodeState::Active(..) => panic!(),
-                DepNodeState::Cached(ref data) => {
-                    Some(DepNodeState::Fresh(data.clone(), DepNodeChanges::Unchanged))
+                DepNodeState::Cached(data) |
+                // Someone else marked it as fresh already
+                DepNodeState::Fresh(data) => {
+                    DepNodeState::Fresh(data)
                 }
-                DepNodeState::Fresh(_, DepNodeChanges::Changed) => panic!(),
-                // Someone else marked it as unchanged already
-                DepNodeState::Fresh(_, DepNodeChanges::Unchanged) => None,
             };
-            if let Some(new) = new {
-                *state = new;
-            }
             Age::Session(session)
         } else {
             self.force_and_check(dep_node)
         }
     }
 
-    // Forces the task to run and return whether its result was the same as the previous session
+    // Forces the task to run and return the age of its result
     fn force_and_check(&self, dep_node: &DepNode) -> Age {
         self.force(dep_node);
 
@@ -99,8 +91,7 @@ impl Builder {
         match *self.node_state(&dep_node) {
             DepNodeState::Cached(..) | DepNodeState::Active(..) => panic!(),
             DepNodeState::Panicked => Age::Stale,
-            DepNodeState::Fresh(ref data, DepNodeChanges::Unchanged) => Age::Session(data.session),
-            DepNodeState::Fresh(_, DepNodeChanges::Changed) => Age::Stale,
+            DepNodeState::Fresh(ref data) => Age::Session(data.session),
         }
     }
 
@@ -163,14 +154,14 @@ impl Builder {
                                 print(&dep_node.task)
                             );
                         }
-                        let (session, changes) = match (dep_node.early_cutoff, &old_result) {
+                        let session = match (dep_node.early_cutoff, &old_result) {
                             (true, Some((old_session, old_result))) if result == *old_result => {
-                                (*old_session, DepNodeChanges::Unchanged)
+                                *old_session
                             }
-                            _ => (self.session, DepNodeChanges::Changed)
+                            _ => self.session
                         };
                         (
-                            DepNodeState::Fresh(DepNodeData { deps, result, session }, changes),
+                            DepNodeState::Fresh(DepNodeData { deps, result, session }),
                             None,
                         )
                     }
@@ -230,7 +221,7 @@ impl Builder {
         match *self.node_state(&dep_node) {
             DepNodeState::Cached(..) | DepNodeState::Active(..) => panic!(),
             DepNodeState::Panicked => (),
-            DepNodeState::Fresh(ref data, _) => return data.result.to_result::<T>(),
+            DepNodeState::Fresh(ref data) => return data.result.to_result::<T>(),
         };
         // Panic here so we don't poison the lock
         panic::resume_unwind(Box::new(PanickedTask))
