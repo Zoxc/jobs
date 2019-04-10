@@ -1,6 +1,6 @@
-use std::process::{ExitStatus, Command, Output, Child};
-use std::io;
 use crate::Builder;
+use std::io;
+use std::process::{Child, Command, ExitStatus, Output};
 
 pub struct CommandRunner<'a, 'b> {
     builder: &'a Builder,
@@ -30,9 +30,6 @@ impl Builder {
         // Tell the process about our jobserver
         self.jobserver.configure(cmd);
 
-        CommandRunner {
-            builder: self,
-            cmd,
-        }
+        CommandRunner { builder: self, cmd }
     }
 }

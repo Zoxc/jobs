@@ -15,29 +15,31 @@ use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 pub use serde_derive::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{Read, Write};
-use std::panic;
 use std::mem;
+use std::panic;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::fmt::Debug;
+use std::sync::Arc;
 
 pub use bincode::{deserialize, serialize};
 pub use util::Symbol;
 
+pub mod cmd;
 mod execute;
 pub mod parallel;
 pub mod util;
-pub mod cmd;
 
 pub struct PanickedTask;
 
 pub struct TaskGroup(pub fn(&mut Builder));
 
-pub trait Task: Eq + Serialize + for<'a> Deserialize<'a> + Hash + Send + Clone + Debug + 'static {
+pub trait Task:
+    Eq + Serialize + for<'a> Deserialize<'a> + Hash + Send + Clone + Debug + 'static
+{
     /// An unique string identifying the task
     const IDENTIFIER: &'static str;
 
@@ -254,7 +256,8 @@ impl Builder {
         ctrlc::set_handler(move || {
             aborted.store(true, Ordering::Release);
             eprintln!("Aborting builder...");
-        }).expect("Setting up Ctrl-C handler");
+        })
+        .expect("Setting up Ctrl-C handler");
     }
 
     pub fn new(path: &Path) -> Self {
@@ -315,7 +318,10 @@ impl Builder {
                 DepNodeState::Active(..) => panic!(),
             }
         }
-        let graph = Graph { data: graph, session: self.session };
+        let graph = Graph {
+            data: graph,
+            session: self.session,
+        };
         let data = bincode::serialize(&graph).unwrap();
         let mut file = File::create(&self.index).unwrap();
         file.write_all(&data).unwrap();

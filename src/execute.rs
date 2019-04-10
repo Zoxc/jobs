@@ -1,12 +1,12 @@
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
-use std::collections::hash_map::Entry;
-use std::panic;
 use std::cmp;
+use std::collections::hash_map::Entry;
 use std::mem;
+use std::panic;
 
 use crate::{
-    ActiveTaskHandle, Builder, DepNode, DepNodeData, DepNodeState, Deps,
-    PanickedTask, SerializedResult, Task, DEPS,
+    ActiveTaskHandle, Builder, DepNode, DepNodeData, DepNodeState, Deps, PanickedTask,
+    SerializedResult, Task, DEPS,
 };
 
 enum Age {
@@ -35,9 +35,7 @@ impl Builder {
                 }
                 DepNodeState::Panicked => return Age::Stale,
                 DepNodeState::Cached(ref data) => break (data.session, data.deps.from.clone()),
-                DepNodeState::Fresh(ref data) => {
-                    return Age::Session(data.session)
-                }
+                DepNodeState::Fresh(ref data) => return Age::Session(data.session),
             };
             handle.await_task();
         };
@@ -50,20 +48,21 @@ impl Builder {
                     Some(Age::Stale) => Some(Age::Stale),
                     None => Some(Age::Session(session)),
                 }
-                
             } else {
                 // The dependency is stale
                 Some(Age::Stale)
             }
         });
 
-        let up_to_date = deps_age.map(|deps_age| {
-            if let Age::Session(deps_session) = deps_age {
-                deps_session <= session
-            } else {
-                false
-            }
-        }).unwrap_or(true);
+        let up_to_date = deps_age
+            .map(|deps_age| {
+                if let Age::Session(deps_session) = deps_age {
+                    deps_session <= session
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(true);
 
         if up_to_date {
             // Mark the node as fresh
@@ -111,9 +110,10 @@ impl Builder {
                     let action = match *entry.get() {
                         DepNodeState::Active(ref handle) => Action::Await(handle.clone()),
                         DepNodeState::Fresh(..) | DepNodeState::Panicked => return,
-                        DepNodeState::Cached(ref data) => {
-                            Action::Create(ActiveTaskHandle::new(), Some((data.session, data.result.clone())))
-                        }
+                        DepNodeState::Cached(ref data) => Action::Create(
+                            ActiveTaskHandle::new(),
+                            Some((data.session, data.result.clone())),
+                        ),
                     };
                     if let Action::Create(ref handle, _) = action {
                         *entry.get_mut() = DepNodeState::Active(handle.clone())
@@ -133,10 +133,7 @@ impl Builder {
                 let deps = Mutex::new(Deps::empty());
                 let print = self.task_printers.get(&dep_node.name).unwrap();
 
-                println!(
-                    "running `{}`",
-                    print(&dep_node.task)
-                );
+                println!("running `{}`", print(&dep_node.task));
                 let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                     DEPS.set(&deps, || compute(self, &dep_node.task))
                 }));
@@ -158,10 +155,14 @@ impl Builder {
                             (true, Some((old_session, old_result))) if result == *old_result => {
                                 *old_session
                             }
-                            _ => self.session
+                            _ => self.session,
                         };
                         (
-                            DepNodeState::Fresh(DepNodeData { deps, result, session }),
+                            DepNodeState::Fresh(DepNodeData {
+                                deps,
+                                result,
+                                session,
+                            }),
                             None,
                         )
                     }
@@ -196,16 +197,17 @@ impl Builder {
         }
 
         // Is there a cached result for this task?
-        let cached_result_exists = !dep_node.eval_always && match self.cached.lock().get(&dep_node) {
-            Some(&DepNodeState::Cached(..)) => true,
-            _ => false,
-        };
+        let cached_result_exists = !dep_node.eval_always
+            && match self.cached.lock().get(&dep_node) {
+                Some(&DepNodeState::Cached(..)) => true,
+                _ => false,
+            };
 
         let outdated = !cached_result_exists || {
             // Try to bring the cached result up to date
             if let Age::Stale = self.try_mark_up_to_date(&dep_node) {
                 match *self.node_state(&dep_node) {
-                    DepNodeState::Cached(..) |DepNodeState::Active(..) => true,
+                    DepNodeState::Cached(..) | DepNodeState::Active(..) => true,
                     DepNodeState::Panicked | DepNodeState::Fresh(..) => false,
                 }
             } else {
