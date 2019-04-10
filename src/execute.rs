@@ -1,11 +1,17 @@
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use std::collections::hash_map::Entry;
 use std::panic;
+use std::cmp;
 
 use crate::{
     ActiveTaskHandle, Builder, DepNode, DepNodeChanges, DepNodeData, DepNodeState, Deps,
     PanickedTask, SerializedResult, Task, DEPS,
 };
+
+enum Age {
+    Stale,
+    Session(u64),
+}
 
 impl Builder {
     fn node_state(&self, dep_node: &DepNode) -> MappedMutexGuard<'_, DepNodeState> {
@@ -14,28 +20,57 @@ impl Builder {
         })
     }
 
-    fn try_mark_up_to_date(&self, dep_node: &DepNode) -> bool {
+    fn try_mark_up_to_date(&self, dep_node: &DepNode) -> Age {
         if dep_node.eval_always {
             // We can immediately execute `eval_always` queries
             return self.force_and_check(dep_node);
         }
 
-        let deps = loop {
+        let (session, deps) = loop {
             let handle = match *self.node_state(&dep_node) {
                 DepNodeState::Active(ref handle) => {
                     // Await the result and then retry
                     handle.clone()
                 }
-                DepNodeState::Panicked => return false,
-                DepNodeState::Cached(ref data) => break data.deps.from.clone(),
-                DepNodeState::Fresh(_, changes) => return changes == DepNodeChanges::Unchanged,
+                DepNodeState::Panicked => return Age::Stale,
+                DepNodeState::Cached(ref data) => break (data.session, data.deps.from.clone()),
+                DepNodeState::Fresh(ref data, changes) => {
+                    return if changes == DepNodeChanges::Unchanged {
+                        Age::Session(data.session)
+                    } else {
+                        Age::Stale
+                    }
+                }
             };
             handle.await_task();
         };
-        let up_to_date = deps.into_iter().all(|node| self.try_mark_up_to_date(&node));
+        let deps_age = deps.into_iter().fold(None, |newest_age, node| {
+            if let Age::Session(session) = self.try_mark_up_to_date(&node) {
+                match newest_age {
+                    Some(Age::Session(newest_session)) => {
+                        Some(Age::Session(cmp::max(newest_session, session)))
+                    }
+                    Some(Age::Stale) => Some(Age::Stale),
+                    None => Some(Age::Session(session)),
+                }
+                
+            } else {
+                // The dependency is stale
+                Some(Age::Stale)
+            }
+        });
+
+        let up_to_date = deps_age.map(|deps_age| {
+            if let Age::Session(deps_session) = deps_age {
+                deps_session <= session
+            } else {
+                false
+            }
+        }).unwrap_or(true);
 
         if up_to_date {
             // Mark the node as green
+            // FIXME: Get rid of Cached / Fresh and just store the `session` instead?
             let state_map = &mut *self.cached.lock();
             let state = state_map.get_mut(&dep_node).unwrap();
             let new = match *state {
@@ -50,28 +85,28 @@ impl Builder {
             if let Some(new) = new {
                 *state = new;
             }
-            true
+            Age::Session(session)
         } else {
             self.force_and_check(dep_node)
         }
     }
 
     // Forces the task to run and return whether its result was the same as the previous session
-    fn force_and_check(&self, dep_node: &DepNode) -> bool {
+    fn force_and_check(&self, dep_node: &DepNode) -> Age {
         self.force(dep_node);
 
         // Check if its still outdated
         match *self.node_state(&dep_node) {
             DepNodeState::Cached(..) | DepNodeState::Active(..) => panic!(),
-            DepNodeState::Panicked => false,
-            DepNodeState::Fresh(_, DepNodeChanges::Unchanged) => true,
-            DepNodeState::Fresh(_, DepNodeChanges::Changed) => false,
+            DepNodeState::Panicked => Age::Stale,
+            DepNodeState::Fresh(ref data, DepNodeChanges::Unchanged) => Age::Session(data.session),
+            DepNodeState::Fresh(_, DepNodeChanges::Changed) => Age::Stale,
         }
     }
 
     fn force(&self, dep_node: &DepNode) {
         enum Action {
-            Create(ActiveTaskHandle, Option<SerializedResult>),
+            Create(ActiveTaskHandle, Option<(u64, SerializedResult)>),
             Await(ActiveTaskHandle),
         }
 
@@ -86,7 +121,7 @@ impl Builder {
                         DepNodeState::Active(ref handle) => Action::Await(handle.clone()),
                         DepNodeState::Fresh(..) | DepNodeState::Panicked => return,
                         DepNodeState::Cached(ref data) => {
-                            Action::Create(ActiveTaskHandle::new(), Some(data.result.clone()))
+                            Action::Create(ActiveTaskHandle::new(), Some((data.session, data.result.clone())))
                         }
                     };
                     if let Action::Create(ref handle, _) = action {
@@ -128,17 +163,14 @@ impl Builder {
                                 print(&dep_node.task)
                             );
                         }
-                        let changes = if dep_node.early_cutoff
-                            && old_result
-                                .map(|old_result| old_result == result)
-                                .unwrap_or(false)
-                        {
-                            DepNodeChanges::Unchanged
-                        } else {
-                            DepNodeChanges::Changed
+                        let (session, changes) = match (dep_node.early_cutoff, &old_result) {
+                            (true, Some((old_session, old_result))) if result == *old_result => {
+                                (*old_session, DepNodeChanges::Unchanged)
+                            }
+                            _ => (self.session, DepNodeChanges::Changed)
                         };
                         (
-                            DepNodeState::Fresh(DepNodeData { deps, result }, changes),
+                            DepNodeState::Fresh(DepNodeData { deps, result, session }, changes),
                             None,
                         )
                     }
@@ -173,24 +205,24 @@ impl Builder {
         }
 
         // Is there a cached result for this task?
-        let cached_result_exists = match self.cached.lock().get(&dep_node) {
+        let cached_result_exists = !dep_node.eval_always && match self.cached.lock().get(&dep_node) {
             Some(&DepNodeState::Cached(..)) => true,
             _ => false,
         };
 
-        if cached_result_exists {
+        let outdated = !cached_result_exists || {
             // Try to bring the cached result up to date
-            if !self.try_mark_up_to_date(&dep_node) {
-                let outdated = match *self.node_state(&dep_node) {
-                    DepNodeState::Cached(..) | DepNodeState::Active(..) => true,
+            if let Age::Stale = self.try_mark_up_to_date(&dep_node) {
+                match *self.node_state(&dep_node) {
+                    DepNodeState::Cached(..) |DepNodeState::Active(..) => true,
                     DepNodeState::Panicked | DepNodeState::Fresh(..) => false,
-                };
-                if outdated {
-                    // The result was outdated, force the task to run
-                    self.force(&dep_node)
                 }
+            } else {
+                false
             }
-        } else {
+        };
+
+        if outdated {
             // There was no cached result, force the task to run
             self.force(&dep_node)
         }

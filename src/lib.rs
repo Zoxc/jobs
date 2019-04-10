@@ -188,6 +188,8 @@ impl Deps {
     }
 }
 
+// FIXME: Can we remove this and just check if DepNodeData.session = Builder.session
+// Might want this as a short-circuit
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum DepNodeChanges {
     Unchanged,
@@ -205,14 +207,17 @@ enum DepNodeState {
 struct DepNodeData {
     deps: Deps,
     result: SerializedResult,
+    session: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Graph {
+    session: u64,
     data: Vec<(DepNode, DepNodeData)>,
 }
 
 pub struct Builder {
+    session: u64,
     aborted: Arc<AtomicBool>,
     jobserver: jobserver::Client,
     index: PathBuf,
@@ -262,6 +267,7 @@ impl Builder {
 
     pub fn new(path: &Path) -> Self {
         let mut builder = Builder {
+            session: 0,
             aborted: Arc::new(AtomicBool::new(false)),
             jobserver: unsafe {
                 jobserver::Client::from_env().unwrap_or_else(|| {
@@ -291,6 +297,7 @@ impl Builder {
         let mut data = Vec::new();
         file.read_to_end(&mut data).unwrap();
         let data = bincode::deserialize::<Graph>(&data).unwrap();
+        builder.session = data.session + 1;
         let map = builder.cached.get_mut();
         for (node, data) in data.data {
             //println!("loading {:?} {:?}", node, data);
@@ -316,7 +323,7 @@ impl Builder {
                 DepNodeState::Active(..) => panic!(),
             }
         }
-        let graph = Graph { data: graph };
+        let graph = Graph { data: graph, session: self.session };
         let data = bincode::serialize(&graph).unwrap();
         let mut file = File::create(&self.index).unwrap();
         file.write_all(&data).unwrap();
