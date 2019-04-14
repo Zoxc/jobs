@@ -122,6 +122,8 @@ macro_rules! tasks {
 
                 type Result = $res;
 
+                // FIXME: Find a way to remove this
+                #[allow(unused_variables)]
                 fn run($builder: &::jobs::Builder, key: Self) -> Self::Result {
                     let ::jobs::strip_field_tys!($name $($fields)*) = key;
                     $($body)*
